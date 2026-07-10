@@ -1,0 +1,257 @@
+=== Clean MetaHuman baseline migration plan ===
+Date: 2026-06-27
+Goal: Prove whether zoom shirt explosion is project contamination or universal MetaHuman/UE behavior.
+
+PERFORMER: Kristofer (Christopher from Quixel Bridge) — all phases use BP_Kristofer.
+Erno is NOT part of this migration. Swap character only after wiring is proven stable.
+
+WHAT WE KNOW (Test_Live_Audio)
+- Erno_Stock_Test: no Godfrey bridge, no ACE wiring, still explodes on zoom.
+- No log lines on zoom (engine LODSync / copy-pose — not game code).
+- Every level load rebuilds Erno + Gavin garment/face meshes (DDC not saved).
+- Godfrey_Realtime_Stage still pulls Gavin assets on load.
+- Missing WP external actor EFKAKWW2KJJDW86S3C3AWO (broken stage references).
+- ACE + custom C++ module load at startup even for visual-only tests.
+
+CONCLUSION
+Stop patching Test_Live_Audio in place. Binary-search in a clean project first.
+
+================================================================================
+PHASE 0 — Clean baseline (NEW PROJECT)  [PASSED]
+================================================================================
+Project: D:/UE Projects/UnrealPerformer/UnrealPerformer.uproject
+  - MetaHuman plugins ONLY
+  - NO NV_ACE_Reference, NO custom C++ module, NO Godfrey_Realtime_Stage
+
+Steps:
+  1. Open UnrealPerformer
+  2. New level: Godfrey_World (Open World)
+  3. Import Kristofer (Christopher) from Quixel Bridge
+  4. Place BP_Kristofer in level, save
+  5. Zoom viewport in/out (no Play)
+
+PASS GATE: Shirt stable at all zoom levels for 30+ seconds.
+Tagged: phase0-kristofer-stable
+
+================================================================================
+PHASE 1 — Match renderer settings from Test_Live_Audio  [PASSED 2026-06-27]
+================================================================================
+Re-test zoom on Kristofer in Godfrey_World.
+Tagged: phase1-renderer-stable
+
+================================================================================
+PHASE 2 — Add empty C++ module (no Godfrey code)  [PASSED 2026-06-27]
+================================================================================
+Tagged: phase2-cpp-stable
+
+================================================================================
+PHASE 3 — Add NV_ACE_Reference plugin (disabled on map)  [PASSED 2026-06-27]
+================================================================================
+Tagged: phase3-ace-plugin-stable
+
+================================================================================
+PHASE 4 — Simple exhibit level (NOT Godfrey_Realtime_Stage yet)  [PASSED 2026-06-27]
+================================================================================
+Simple exhibit on Godfrey_World — floor, soft daylight, Kristofer only.
+
+Applied (Scripts/setup_phase4_kristofer_exhibit.py + restore/fix scripts):
+  - Exhibit_Floor (50m plane at z=1, anti-flicker material/flags)
+  NOTE: Phase 4 originally left a duplicate floor WP package (2/O2); removed 2026-06-27.
+  Keep single package: 5/9Z/I0ISZ04GH0UUPDGL2KHG7Y.
+  - Movable Lumen sun/skylight + Exhibit_Fill lights + manual exposure
+  - User-tuned light intensities and performer placement (saved on exit)
+  - BP_Kristofer exhibit framing; zoom stable 30+ seconds
+
+PASS GATE: Zoom Kristofer — shirt stable 30+ seconds.  PASSED.
+Tagged: phase4-exhibit-stable
+
+================================================================================
+PHASE 5 — Migrate stage geometry only  [APPLIED 2026-06-28 — editor UI]
+================================================================================
+Headless Python spawn failed earlier (WP cell splits); backdrop/stage added via editor UI.
+
+Applied (user in Godfrey_World):
+  - Stage backdrop (Plane + M_Redgate_Background / MI_Stage_Backdrop)
+  - Exhibit_Floor sand material (user-assigned)
+  - Stage lighting / exhibit layout saved on level
+  - Duplicate Exhibit_Floor WP package (2/O2) removed; single floor 5/9Z retained
+
+Scripts/docs: Docs/UE56_EditorScriptingGuidelines.md, verify_godfrey_exhibit.py,
+  save_stage_backdrop_transform.py (editor only). Do NOT run headless spawn scripts.
+
+Before ANY user PASS gate, run verify_godfrey_exhibit.py headless → RESULT: PASS.
+
+PASS GATE: Zoom Kristofer — shirt stable 30+ seconds with stage visible.  PASSED.
+Tagged: phase5-exhibit-stage-stable (pending user tag after push)
+
+================================================================================
+PHASE 6 — Exhibition wiring for Kristofer (one component at a time)
+================================================================================
+Only after Phase 0–5 pass. Add in order, zoom-test after each:
+  1. Godfrey performer BP shell around Kristofer (meshes only, no bridge)  [PASSED 2026-06-28]
+  2. GodfreyPerformerAnimationBridge (bAutoActivate=false first)  [PASSED 2026-06-28]
+  3. Body anim instance  [PASSED 2026-06-28]
+  4. ACE audio curve source  [PASSED 2026-06-28]
+  5. Speech / performance state  [PASSED 2026-06-28]
+  6. World Partition + exhibit placement  [PASSED 2026-06-28]
+
+Step 1 scripts (2026-06-28):
+  - provision_phase6_godfrey_performer_asset.py — headless: duplicate BP_Kristofer ->
+      /Game/MetaHumans/Godfrey/BP_Godfrey_Performer
+  - setup_phase6_godfrey_performer_shell.py — editor only: swap level actor to shell
+  - Config/PerformerCharacterProfile_Kristofer.json — mesh profile metadata for future swaps
+  - verify_godfrey_exhibit.py accepts BP_Godfrey_Performer or BP_Kristofer
+
+PASS GATE (step 1): Run setup script in editor, verify headless PASS, zoom shirt 30+ s.  PASSED.
+
+Step 2 (2026-06-28):
+  - C++ migrated to Source/UnrealPerformer/: GodfreyPerformerAnimationBridgeComponent,
+      GodfreyPerformanceStateComponent (link dep only), GodfreyBodyAnimInstance (compile dep),
+      GodfreyPerformanceTypes, GodfreyPerformanceLog
+  - setup_phase6_step2_animation_bridge.py — add bridge to BP_Godfrey_Performer, bAutoActivate=false
+  - Rebuild UnrealPerformerEditor, restart editor, run script, zoom-test 30+ s
+
+PASS GATE (step 2): verify PASS + zoom shirt 30+ s with inert bridge on performer.  PASSED.
+
+Step 3 (2026-06-28):
+  - setup_phase6_step3_body_anim_instance.py — Body AnimClass = GodfreyBodyAnimInstance
+  - Face stays stock Face_AnimBP; bridge remains bAutoActivate=false
+
+PASS GATE (step 3): zoom shirt 30+ s with GodfreyBodyAnimInstance on Body.  PASSED.
+
+Step 4 (2026-06-28):
+  - setup_phase6_step4_ace_audio_curve_source.py — ACEAudioCurveSource on root
+  - bAutoActivate=false, bEnableAttenuationDebug=false
+  - Face stays Face_AnimBP; bridge still inert; no PerformanceState / AudioCapture / speech
+  - setup_fix_godfrey_exhibit_play_sphere.py — GM_Godfrey_Exhibit (Default Pawn None) fixes PIE sphere
+  - Docs/UE56 + .cursor/rules/ue56-only.mdc — Cursor must use UE 5.6.1 instructions only
+
+PASS GATE (step 4): zoom shirt 30+ s with ACE component present but inactive.  PASSED.
+
+Step 5 (2026-06-28):
+  - setup_phase6_step5_performance_state.py — GodfreyPerformanceStateComponent on actor
+  - bAutoActivate=false, bAutoSpeakingStateFromUtterance=false, bRoutePerformanceCuesToStates=false
+  - Bridge + ACE remain inert; no DirectSpeech / AudioCapture / AceWarmup / Gaze
+
+PASS GATE (step 5): zoom shirt 30+ s with idle performance state bus only.  PASSED.
+
+Step 6 (2026-06-28):
+  - setup_phase6_step6_exhibit_finalize.py — confirm BP stack + Godfrey_World placement + verify
+  - EDITOR ONLY for performer swap/save (Tools > Execute Python Script; wp.Editor.LoadAllCells first)
+  - Headless: BP audit + read-only verify only — NEVER spawn/destroy actors via UnrealEditor-Cmd
+  - INCIDENT 2026-06-28: automated Cmd spawn (destroy Kristofer + spawn Godfrey) crashed editor on
+    quit in HairStrandsCore (groom bindings). Script failed before save_dirty_packages — tracked WP
+    uassets unchanged in git. Empty orphan cell folder 0/ may appear; delete if empty.
+  - INCIDENT 2026-06-28: automated Cmd spawn crashed on quit — do NOT repeat. Editor run OK.
+  - Editor run: swapped BP_Kristofer -> BP_Godfrey_Performer at (540,0,10), verify PASS, saved
+
+PASS GATE (step 6): verify_godfrey_exhibit.py PASS + zoom shirt 30+ s (full Phase 6 stack).  PASSED.
+Tagged: phase6-exhibit-wiring-stable (pending push)
+
+PHASE 6 COMPLETE — full inert exhibition stack on Godfrey_World without shirt explosion at zoom.
+Tagged: phase6-exhibit-wiring-stable
+
+================================================================================
+PHASE 7 — Speech + lip sync (body actions still OFF)
+================================================================================
+One-shot chunk (2026-06-28): port speech C++ from Test_Live_Audio, wire active ACE + warmup on
+BP_Godfrey_Performer. Bridge montages and performance-state auto routing stay OFF.
+
+Step 1 (dev G-key path — superseded for exhibition):
+  - setup_phase7_step1_speech_lipsync_only.py — DirectSpeech + dev keyboard G
+
+Step 2 (production exhibition path — matches Test_Live_Audio queue poll):
+  - GodfreyExhibitionQueuePollComponent on GM_Godfrey_Exhibit (~1s → PullQueuedGodfreySpeechToAudio)
+  - Removes GodfreyDirectSpeech from performer (no G key)
+  - setup_phase7_step2_exhibition_queue_poll.py (headless BP + GM edit)
+
+Step 3 (lip sync graph — ACE Apply node on Face_AnimBP):
+  - Stock Bridge Face_AnimBP lacks Apply ACE Face Animations; copy ACE-patched asset from Test_Live_Audio
+  - setup_phase7_step3_face_ace_lipsync.py
+  - PIE log should include: [ACE sync] First curve weights applied
+
+C++ ported to UnrealPerformer module:
+  - GodfreyDirectSpeechComponent, GodfreyAceWarmupComponent, GodfreyExhibitionQueuePollComponent
+  - AsyncActionStreamGodfreySpeech, GodfreyPcmStreamSession
+  - UnrealPerformerGodfreySettings + ACE startup in UnrealPerformer.cpp
+
+Plugins required (junction from Test_Live_Audio — see Docs/ACEPlugin.txt):
+  - NV_ACE_Reference
+  - NvAudio2FaceMark  (registers LocalA2F-Mark — without it ACE rejects all audio chunks)
+
+ON:  ACE bAutoActivate=true, AceWarmup on performer, queue poll on GM_Godfrey_Exhibit
+OFF: bridge bAutoActivate, performance auto utterance/cues, montages, gaze, mic capture, DirectSpeech
+
+PASS GATE: PIE on Godfrey_World, Godfrey Brain at localhost:3000, queue TTS from exhibition site —
+hear voice + lip sync without pressing G. Zoom-test shirt 30+ s after speech test.
+
+ACE audio in PIE: procedural voice uses bIsUISound (no distance attenuation). Warmup calls Stop()
+after silent priming so speech gets a clean AudioComponent. Rebuild after ACE plugin edits.
+
+Stop at first step that breaks zoom or speech.
+
+================================================================================
+PHASE 8 — Body actions (speech + lip sync stay ON)
+================================================================================
+One component cluster per step; zoom-test 30+ s after each. Keep bridge bAutoActivate=false
+and bManageMetaHumanGarmentsAtRuntime=false unless a step explicitly needs garment hacks.
+
+Step 0 (2026-06-28):
+  - Copy Content/Godfrey/Animation from Test_Live_Audio (Mixamo + Retargeted talking assets)
+  - As_Godfrey_Talking_Anim + As_Godfrey_Talking_Anim_Montage on m_med_nrw (Kristofer-compatible)
+  - setup_phase8_step0_montage_assets.py — verify skeleton, assign SpeakingIdleMontage on bridge
+  - OFF: bAutoSpeakingStateFromUtterance, bRoutePerformanceCuesToStates, gaze, attention
+
+PASS GATE (step 0): assets in Content Browser; skeleton audit PASS; SpeakingIdleMontage assigned.
+Manual PIE: BeginSpeaking on performance state → upper-body talking loop. Zoom 30+ s.
+
+Step 1 (2026-06-29):
+  - bAutoSpeakingStateFromUtterance=true on GodfreyPerformanceStateComponent
+  - setup_phase8_step1_utterance_speaking_state.py
+  - Queue TTS -> NotifyUtteranceStarted -> BeginSpeaking -> SpeakingIdleMontage loop
+
+PASS GATE (step 1): exhibition queue TTS -> voice + lip sync + body talking montage.
+Log: auto utterance -> BeginSpeaking; playing montage As_Godfrey_Talking_Anim_Montage.
+PASSED (2026-06-29). Mixamo placeholder motion acceptable; custom Kristofer montages deferred.
+
+Step 2 (2026-06-29):
+  - bEnableIdleMicroMotion=true on GodfreyPerformerAnimationBridgeComponent
+  - setup_phase8_step2_idle_micro_motion.py
+  - Bridge behaviour tick drives IdleBreathingWave / IdlePostureSwayWave (no garment hacks)
+  - Still OFF: bRoutePerformanceCuesToStates, gaze, attention, IdleBreathingMontage assets
+
+PASS GATE (step 2): after queue utterance ends, log ReturnedToIdle + behaviour tick IdleMicro=1;
+voice + lip sync + speaking montage unchanged from step 1. Zoom shirt 30+ s idle + one TTS.
+Before script: stop PIE, close BP_Godfrey_Performer editor tab (Windows file-lock on save).
+PASSED (2026-06-29).
+
+Step 3 (2026-06-29):
+  - bRoutePerformanceCuesToStates=true on GodfreyPerformanceStateComponent
+  - setup_phase8_step3_performance_cue_routing.py
+  - PCM stream NotifyPerformanceCue -> built-in routing (emphasis/think/listen/speak/idle)
+  - Still OFF: gaze, attention, Thinking/Listening montage slots
+
+PASS GATE (step 3): steps 1–2 unchanged in PIE. Log audit bRoutePerformanceCuesToStates=true.
+Brain may log performance events: none until exhibition sends cues; when present:
+GodfreyPerformer: cue type=... and bridge cue forwarded. Zoom 30+ s.
+
+Deferred (parallel, not blocking step 3):
+  - Custom Kristofer talking montages (replace As_Godfrey_Talking_Anim_Montage)
+  - SpeakingStart / ReturnToIdle / Thinking / Listening montage assets
+  - Gaze / attention follow
+
+DO NOT USE AS ROLLBACK / DONOR
+================================================================================
+- BP_Gavin.uasset (reference hash only)
+- Duplicated Gavin performers
+- BP_MH_Godfrey, BP_Godfrey_Exhibition contaminated paths
+- fix_erno_editor_clothing_setup.py on stock paths
+- Godfrey_Realtime_Stage external actors until WP is rebuilt clean
+- Erno assets from Test_Live_Audio (contaminated; not needed for Kristofer path)
+
+================================================================================
+QUICK LAUNCH
+================================================================================
+& "C:\Program Files\Epic Games\UE_5.6\Engine\Binaries\Win64\UnrealEditor.exe" "D:\UE Projects\MetaHuman_Baseline_Test\UnrealPerformer.uproject"
+
+Git: push/tag GitHub only after you confirm PASS on each phase gate.

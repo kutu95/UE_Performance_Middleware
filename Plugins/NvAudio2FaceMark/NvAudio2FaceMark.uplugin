@@ -1,0 +1,32 @@
+{
+	"FileVersion": 3,
+	"Version": 3,
+	"VersionName": "2.4.0-20250610-2270",
+	"FriendlyName": "NVIDIA ACE: Audio2Face-3D local execution (Mark diffusion model 3.0, 60 FPS)",
+	"Description": "Provides facial animations through NVIDIA Audio2Face-3D local execution.",
+	"Category": "NVIDIA",
+	"CreatedBy": "NVIDIA",
+	"CreatedByURL": "https://www.nvidia.com",
+	"DocsURL": "https://docs.nvidia.com/ace/latest/workflows/kairos/kairos-unreal-plugin.html",
+	"MarketplaceURL": "https://www.unrealengine.com/marketplace/en-US/product/ace-unreal-engine-plugin",
+	"SupportURL": "https://www.nvidia.com",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": false,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "A2FLocalMark",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "NV_ACE_Reference",
+			"Enabled": true
+		}
+	]
+}
