@@ -1,41 +1,30 @@
-# unrealperformer
+# unrealperformer (Captain Godfrey)
 
-Clean MetaHuman baseline for the Godfrey live-audio exhibition performer (UE 5.6).
+**Production master:** UE **5.8** — `D:\UE Projects\MetaHuman_Baseline_UE58_Test`
 
-## Known-good checkpoint (Phase 0)
+See **[Docs/UE58_Baseline.md](Docs/UE58_Baseline.md)** and **[Docs/EngineeringManual.md](Docs/EngineeringManual.md)**.
 
-- **Project:** `UnrealPerformer` (`D:\UE Projects\UnrealPerformer`)
-- **Level:** `Content/Godfrey_World.umap`
-- **MetaHuman:** Kristofer (Christopher from Quixel Bridge) — all migration phases use this character, not Erno
-- **Test:** Viewport zoom in/out — clothing stays stable (no shirt explosion)
+## Known-good checkpoints
+
+| Tag / note | Meaning |
+|------------|---------|
+| `restore/ue58-audio-ok-2026-07-10` | UE 5.8 clone with PIE audio mute fix (pre–Phase 1) |
+| Phase 1 hardening | Diagnostics, validation tool, config, docs — behaviour unchanged |
 
 ## Open in Unreal
 
-1. Epic Games Launcher → UE **5.6**
+1. Epic Games Launcher → UE **5.8**
 2. Open `UnrealPerformer.uproject`
 3. Level: **Godfrey_World**
-
-## Revert to this state
-
-```powershell
-git checkout main
-git pull
-```
-
-Or restore a tagged release:
-
-```powershell
-git checkout phase0-kristofer-stable
-```
+4. Optional: **Tools → Validate Godfrey Project**
 
 ## Not in this repo
 
-- **`Content/MetaHumans/`** (~1.3 GB) — stock Quixel Bridge assets; re-import locally (see `Docs/MetaHumanAssets.txt`)
-- `Saved/`, `Intermediate/`, `Binaries/` — regenerated locally
-- `Test_Live_Audio` (legacy contaminated project) — reference only, not versioned here
+- **`Content/MetaHumans/`** — stock Quixel Bridge assets (see `Docs/MetaHumanAssets.txt`)
+- ACE third-party binaries (see `Docs/ACEPlugin.txt`)
+- `Saved/`, `Intermediate/`, `Binaries/`
 
-This keeps git small and tracks only **your** customizations: levels, config, and future exhibition wiring.
+## Backups (do not treat as master)
 
-## Migration plan
-
-See `Docs/MigrationPlan.txt` for phased steps to reintroduce ACE, C++, and exhibition wiring.
+- `MetaHuman_Baseline_Test` — UE 5.6 known-good
+- `Test_Live_Audio` — legacy reference

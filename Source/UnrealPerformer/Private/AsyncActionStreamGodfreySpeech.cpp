@@ -6,6 +6,8 @@
 
 #include "GodfreyPerformanceStateComponent.h"
 
+#include "GodfreyDiagnostics.h"
+
 #include "UnrealPerformerGodfreySettings.h"
 
 #include "ACEAudioCurveSourceComponent.h"
@@ -600,6 +602,14 @@ void UAsyncActionStreamGodfreySpeech::HandleExhibitionTtsStatusCompleted(
 	QueuedTtsRequestId = ReqId;
 
 	UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("PullQueuedGodfreySpeechToAudio: Queue ready, requestId=%s"), *QueuedTtsRequestId);
+	if (UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr)
+	{
+		if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(World))
+		{
+			Diag->SetQueueLength(1);
+			UE_LOG(LogGodfreyQueue, Log, TEXT("[Queue] Speech ready | requestId=%s"), *QueuedTtsRequestId);
+		}
+	}
 
 
 
@@ -650,6 +660,7 @@ void UAsyncActionStreamGodfreySpeech::HandleExhibitionTtsStatusCompleted(
 
 
 	StreamSession->SetClientRequestT0PlatformSeconds(ClientRequestT0);
+	StreamSession->SetBrainRequestId(QueuedTtsRequestId);
 
 	StreamSession->OnPlaybackStarted.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackStarted);
 

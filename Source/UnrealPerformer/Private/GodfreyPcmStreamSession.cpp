@@ -7,6 +7,7 @@
 #include "ACERuntimeModule.h"
 #include "ACEBlueprintLibrary.h"
 #include "ACEAudioCurveSourceComponent.h"
+#include "GodfreyDiagnostics.h"
 #include "UnrealPerformerGodfreySettings.h"
 
 #include "AudioDevice.h"
@@ -265,6 +266,11 @@ static const TCHAR* AudioComponentPlayStateToString(const EAudioComponentPlaySta
 void UGodfreyPcmStreamSession::SetClientRequestT0PlatformSeconds(double PlatformSeconds)
 {
 	ClientRequestT0PlatformSeconds = PlatformSeconds;
+}
+
+void UGodfreyPcmStreamSession::SetBrainRequestId(const FString& InRequestId)
+{
+	BrainRequestId = InRequestId;
 }
 
 void UGodfreyPcmStreamSession::NotifyFirstHttpBodyBytesPlatformSeconds(double PlatformSeconds)
@@ -1384,6 +1390,11 @@ void UGodfreyPcmStreamSession::TryStartParallelAudiblePlayback(bool bIgnoreBuffe
 		bAceVolumeMutedForParallelLipSync ? 1 : 0);
 
 	LogAudiblePlaybackDiagnostics(TEXT("parallel-play-started"));
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(World))
+	{
+		Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::AudioQueued);
+		Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::FirstAudibleSample);
+	}
 	if (AActor* CharacterForTimer = TargetCharacter.Get())
 	{
 		ScheduleAudibleDiagnosticsTimer(CharacterForTimer->GetWorld());
@@ -1392,7 +1403,7 @@ void UGodfreyPcmStreamSession::TryStartParallelAudiblePlayback(bool bIgnoreBuffe
 
 int32 UGodfreyPcmStreamSession::GetParallelAudibleEffectiveSampleRate() const
 {
-	constexpr int32 MixerSampleRate = 48000;
+	const int32 MixerSampleRate = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyMixerUpsampleSampleRate;
 	if (StreamSampleRate <= 0)
 	{
 		return MixerSampleRate;
@@ -1458,8 +1469,8 @@ void UGodfreyPcmStreamSession::UpsamplePcm16MonoForAudiblePlayback(
 		return;
 	}
 
-	constexpr int32 MixerSampleRate = 48000;
-	if (SourceSampleRate >= MixerSampleRate || (MixerSampleRate % SourceSampleRate) != 0)
+	const int32 MixerSampleRate = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyMixerUpsampleSampleRate;
+	if (SourceSampleRate >= MixerSampleRate || MixerSampleRate <= 0 || (MixerSampleRate % SourceSampleRate) != 0)
 	{
 		return;
 	}
@@ -1557,6 +1568,12 @@ void UGodfreyPcmStreamSession::HandleAceAnimationStarted()
 	OnPlaybackStarted.Broadcast();
 	OnLipSyncStarted.Broadcast();
 
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(TargetCharacter.Get()))
+	{
+		Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::AudioPlaybackStarted);
+		Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::FirstAudibleSample);
+	}
+
 	LogAudiblePlaybackDiagnostics(TEXT("OnAnimationStarted"));
 
 	UE_LOG(LogGodfreyPcmStream, Log,
@@ -1591,6 +1608,12 @@ void UGodfreyPcmStreamSession::HandleAceAnimationEnded()
 		WorldNow,
 		PlatformNow,
 		TotalSamplesSentToAce);
+
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(TargetCharacter.Get()))
+	{
+		Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::AceComplete);
+		Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::SpeechFinished);
+	}
 
 	OnPlaybackEnded.Broadcast();
 
@@ -1669,6 +1692,17 @@ bool UGodfreyPcmStreamSession::StartStream(UObject* WorldContextObject, AActor* 
 	FirstOnAnimationStartedPlatformSeconds = -1.0;
 	bStreamStarted = true;
 	bFinished = false;
+	SpeechId.Reset();
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(World))
+	{
+		SpeechId = Diag->BeginUtterance(UtteranceOrdinal, BrainRequestId);
+	}
+	else
+	{
+		SpeechId = BrainRequestId.IsEmpty()
+			? FString::Printf(TEXT("utt-%d"), UtteranceOrdinal)
+			: FString::Printf(TEXT("utt-%d-%s"), UtteranceOrdinal, *BrainRequestId.Left(8));
+	}
 	bGodfreyAcePrimingApplied = false;
 	bGodfreySavedAceBufferLength = false;
 	bGodfreySavedAceMinBlend = false;
@@ -1869,6 +1903,11 @@ bool UGodfreyPcmStreamSession::PushPcm16Chunk(const TArray<uint8>& PcmBytes, FSt
 			StreamNumChannels,
 			FirstChunkWorldTimeSeconds,
 			FirstChunkPlatformSeconds);
+		if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(Character))
+		{
+			Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::AudioReady);
+			Diag->MarkStage(SpeechId, EGodfreyUtteranceStage::AceStarted);
+		}
 	}
 
 	const float ChunkMs = GetDefault<UUnrealPerformerGodfreySettings>()->AceMaxPcmPushChunkDurationMs;

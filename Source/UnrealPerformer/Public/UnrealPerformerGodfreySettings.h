@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 
 #include "Engine/DeveloperSettings.h"
+#include "InputCoreTypes.h"
 
 #include "UnrealPerformerGodfreySettings.generated.h"
 
@@ -15,7 +16,7 @@
 
  * Project settings for Godfrey PCM → ACE streaming (chunk size, burst override, diagnostics).
 
- * Edit under Project Settings → Plugins → Test Live Audio (Godfrey), or DefaultEngine.ini
+ * Edit under Project Settings → Plugins → Unreal Performer (Godfrey / ACE), or DefaultEngine.ini
  * [/Script/UnrealPerformer.UnrealPerformerGodfreySettings] (Config=Engine).
 
  */
@@ -242,6 +243,44 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "ACE Playback Priming", meta = (EditCondition = "bGodfreyUseParallelPcmAudiblePlayback"))
 	bool bGodfreyAudibleSpawnAtPlayerLocation = true;
+
+	// --- Phase 1 hardening (diagnostics / config; defaults preserve current behaviour) ---
+
+	/** Emit structured [Speech]/[ACE]/[Audio]/… pipeline stage lines correlated by SpeechId. */
+	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|Pipeline")
+	bool bGodfreyStructuredPipelineLogging = true;
+
+	/** Emit [Performance] TimingMs summary when an utterance completes. */
+	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|Pipeline")
+	bool bGodfreyLogUtteranceTimingMs = true;
+
+	/** Show the Godfrey runtime performance overlay in PIE / Development builds. */
+	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|HUD")
+	bool bGodfreyShowRuntimePerfHud = true;
+
+	/** Toggle key for the runtime performance overlay (PIE). */
+	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|HUD")
+	FKey GodfreyPerfHudToggleKey = EKeys::F8;
+
+	/** Default exhibition queue poll interval (seconds). Components may still override locally. */
+	UPROPERTY(Config, EditAnywhere, Category = "Queue", meta = (ClampMin = "0.2", ClampMax = "5.0"))
+	float GodfreyDefaultQueuePollIntervalSeconds = 1.0f;
+
+	/** Default PCM sample rate for exhibition / direct speech paths. */
+	UPROPERTY(Config, EditAnywhere, Category = "Speech", meta = (ClampMin = "8000", ClampMax = "48000"))
+	int32 GodfreyDefaultStreamSampleRate = 24000;
+
+	/** Mixer sample rate used when upsampling parallel audible PCM. */
+	UPROPERTY(Config, EditAnywhere, Category = "Audio", meta = (ClampMin = "16000", ClampMax = "96000"))
+	int32 GodfreyMixerUpsampleSampleRate = 48000;
+
+	/** Blend-out seconds when stopping speaking idle montage (animation bridge). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float GodfreySpeakingIdleMontageBlendOutSeconds = 0.25f;
+
+	/** Upper-body layered montage blend weight on GodfreyBodyAnimInstance (read at init). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GodfreyUpperBodyMontageBlendWeight = 0.45f;
 
 	virtual FName GetCategoryName() const override;
 

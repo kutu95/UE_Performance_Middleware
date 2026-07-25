@@ -36,9 +36,12 @@ Plugins/NvAudio2FaceMark/ThirdParty/
 Plugins/NvAudio2FaceMark/Binaries/
 Plugins/NvAudio2FaceMark/Intermediate/
 
+# Marketplace plugins (large; install locally) and Capture Manager imports
+Plugins/Marketplace/
+Content/CaptureManager/
+
 # Don't ignore uproject or Config
 
 # Python
 Scripts/__pycache__/
 *.pyc
-

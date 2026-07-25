@@ -2,6 +2,9 @@
 
 #include "AsyncActionStreamGodfreySpeech.h"
 #include "ACEAudioCurveSourceComponent.h"
+#include "GodfreyDiagnostics.h"
+#include "GodfreyRuntimePerfHudComponent.h"
+#include "UnrealPerformerGodfreySettings.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -12,11 +15,26 @@ DEFINE_LOG_CATEGORY_STATIC(LogGodfreyExhibitionQueue, Log, All);
 UGodfreyExhibitionQueuePollComponent::UGodfreyExhibitionQueuePollComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+	PollIntervalSeconds = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyDefaultQueuePollIntervalSeconds;
+	StreamSampleRate = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyDefaultStreamSampleRate;
 }
 
 void UGodfreyExhibitionQueuePollComponent::BeginPlay()
 {
 	Super::BeginPlay();
+#if !UE_BUILD_SHIPPING
+	if (GetDefault<UUnrealPerformerGodfreySettings>()->bGodfreyShowRuntimePerfHud)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			if (!Owner->FindComponentByClass<UGodfreyRuntimePerfHudComponent>())
+			{
+				UGodfreyRuntimePerfHudComponent* Hud = NewObject<UGodfreyRuntimePerfHudComponent>(Owner, TEXT("GodfreyRuntimePerfHud"));
+				Hud->RegisterComponent();
+			}
+		}
+	}
+#endif
 	if (bPollOnBeginPlay)
 	{
 		StartPolling();
@@ -54,7 +72,13 @@ AActor* UGodfreyExhibitionQueuePollComponent::ResolveCharacterForAce() const
 		for (TActorIterator<AActor> It(World); It; ++It)
 		{
 			AActor* Actor = *It;
-			if (IsValid(Actor) && Actor->GetActorLabel() == TEXT("BP_Godfrey_Performer"))
+			if (!IsValid(Actor))
+			{
+				continue;
+			}
+			// GetActorNameOrLabel is editor-safe; packaged builds fall back to actor name.
+			if (Actor->GetActorNameOrLabel() == TEXT("BP_Godfrey_Performer")
+				|| Actor->GetName().Contains(TEXT("BP_Godfrey_Performer")))
 			{
 				return Actor;
 			}
@@ -84,6 +108,10 @@ void UGodfreyExhibitionQueuePollComponent::StartPolling()
 		TEXT("Exhibition queue poll started (interval=%.2fs, brain=%s)"),
 		PollIntervalSeconds,
 		*GodfreyBrainBaseUrl);
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(World))
+	{
+		Diag->SetQueueLength(0);
+	}
 }
 
 void UGodfreyExhibitionQueuePollComponent::StopPolling()

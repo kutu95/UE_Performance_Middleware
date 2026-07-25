@@ -1,6 +1,7 @@
 #include "GodfreyBodyAnimInstance.h"
 
 #include "GodfreyPerformanceLog.h"
+#include "UnrealPerformerGodfreySettings.h"
 
 const FName UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName(TEXT("DefaultSlot"));
 
@@ -12,7 +13,11 @@ namespace
  * Native custom graphs often report GetSlotMontageGlobalWeight==0 — Update() forces the layer when any montage is playing.
  */
 constexpr int32 GodfreyUpperBodyBlendDepth = 4;
-constexpr float GodfreyUpperBodyMontageBlendWeight = 0.45f;
+
+float GetConfiguredUpperBodyMontageBlendWeight()
+{
+	return GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyUpperBodyMontageBlendWeight;
+}
 
 void ConfigureUpperBodyLayer(FAnimNode_LayeredBoneBlend& LayeredBlendNode)
 {
@@ -46,7 +51,7 @@ void FGodfreyBodyAnimInstanceProxy::Initialize(UAnimInstance* InAnimInstance)
 		TEXT("GodfreyBodyAnimInstance: initialized (slot=%s, upper-body layered blend from spine_01 depth=%d weight=%.2f)."),
 		*UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName.ToString(),
 		GodfreyUpperBodyBlendDepth,
-		GodfreyUpperBodyMontageBlendWeight);
+		GetConfiguredUpperBodyMontageBlendWeight());
 }
 
 void FGodfreyBodyAnimInstanceProxy::Update(float DeltaSeconds)
@@ -59,7 +64,8 @@ void FGodfreyBodyAnimInstanceProxy::Update(float DeltaSeconds)
 		{
 			SlotWeight = 1.f;
 		}
-		LayeredBlendNode.BlendWeights[0] = SlotWeight > KINDA_SMALL_NUMBER ? GodfreyUpperBodyMontageBlendWeight : 0.f;
+		const float ConfigWeight = GetConfiguredUpperBodyMontageBlendWeight();
+		LayeredBlendNode.BlendWeights[0] = SlotWeight > KINDA_SMALL_NUMBER ? ConfigWeight : 0.f;
 	}
 
 	FAnimInstanceProxy::Update(DeltaSeconds);

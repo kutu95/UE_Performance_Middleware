@@ -1,5 +1,6 @@
 #include "GodfreyPerformanceStateComponent.h"
 
+#include "GodfreyDiagnostics.h"
 #include "GodfreyPerformanceLog.h"
 #include "GameFramework/Actor.h"
 
@@ -156,6 +157,11 @@ void UGodfreyPerformanceStateComponent::ResetToIdle()
 void UGodfreyPerformanceStateComponent::NotifyUtteranceStarted()
 {
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: NotifyUtteranceStarted"));
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
+	{
+		Diag->MarkStageForCurrent(EGodfreyUtteranceStage::BehaviourStarted);
+		Diag->SetBehaviourStateName(TEXT("Speaking"));
+	}
 	OnGodfreyUtteranceStarted.Broadcast();
 
 	if (bAutoSpeakingStateFromUtterance)
@@ -168,6 +174,11 @@ void UGodfreyPerformanceStateComponent::NotifyUtteranceStarted()
 void UGodfreyPerformanceStateComponent::NotifyUtteranceEnded()
 {
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: NotifyUtteranceEnded"));
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
+	{
+		Diag->MarkStageForCurrent(EGodfreyUtteranceStage::BehaviourFinished);
+		Diag->SetBehaviourStateName(TEXT("Idle"));
+	}
 	OnGodfreyUtteranceEnded.Broadcast();
 
 	if (bAutoSpeakingStateFromUtterance)

@@ -8,6 +8,6 @@ public class UnrealPerformerEditorTarget : TargetRules
 		Type = TargetType.Editor;
 		DefaultBuildSettings = BuildSettingsVersion.V7;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
-		ExtraModuleNames.AddRange(new string[] { "UnrealPerformer" });
+		ExtraModuleNames.AddRange(new string[] { "UnrealPerformer", "UnrealPerformerEditor" });
 	}
 }

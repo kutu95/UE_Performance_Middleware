@@ -1,8 +1,10 @@
 #include "GodfreyPerformerAnimationBridgeComponent.h"
 
 #include "GodfreyBodyAnimInstance.h"
+#include "GodfreyDiagnostics.h"
 #include "GodfreyPerformanceLog.h"
 #include "GodfreyPerformanceStateComponent.h"
+#include "UnrealPerformerGodfreySettings.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
@@ -32,10 +34,14 @@
 
 namespace
 {
-static constexpr float SpeakingIdleMontageBlendOut = 0.25f;
 /** One anim-sequence cycle per dynamic speaking montage; section loop + tick rewind sustain speech. */
 static constexpr int32 GodfreySpeakingIdleSegmentLoopCount = 1;
 static constexpr float GestureIntensityDefault = 1.f;
+
+float GetSpeakingIdleMontageBlendOut()
+{
+	return GetDefault<UUnrealPerformerGodfreySettings>()->GodfreySpeakingIdleMontageBlendOutSeconds;
+}
 
 const TCHAR* AnimTickOptionToString(const EVisibilityBasedAnimTickOption Option)
 {
@@ -3308,6 +3314,15 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 
 	const float PlayLength = AnimInst->Montage_Play(PlayMontage, FMath::Max(0.05f, PlayRate));
 
+	if (PlayLength > KINDA_SMALL_NUMBER)
+	{
+		if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
+		{
+			Diag->SetCurrentAnimationName(PlayMontage->GetName());
+			Diag->MarkStageForCurrent(EGodfreyUtteranceStage::BodyAnimStarted);
+		}
+	}
+
 	if (PlayLength > KINDA_SMALL_NUMBER && bLoopMontage)
 	{
 		ApplySpeakingMontageSectionLoop(AnimInst, PlayMontage);
@@ -3396,7 +3411,7 @@ void UGodfreyPerformerAnimationBridgeComponent::StopIdleBreathingMontageIfActive
 	}
 	if (AnimInst->Montage_IsActive(IdleBreathingMontage))
 	{
-		AnimInst->Montage_Stop(SpeakingIdleMontageBlendOut, IdleBreathingMontage);
+		AnimInst->Montage_Stop(GetSpeakingIdleMontageBlendOut(), IdleBreathingMontage);
 		UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge [IdleBreath]: stopped '%s'."),
 			*IdleBreathingMontage->GetName());
 	}
@@ -3599,7 +3614,7 @@ void UGodfreyPerformerAnimationBridgeComponent::StopSpeakingBehaviour()
 		UAnimMontage* const Resolved = ResolveMontageForBodySlot(Montage, TEXT("StopSpeaking"));
 		if (Resolved && AnimInst->Montage_IsActive(Resolved))
 		{
-			AnimInst->Montage_Stop(SpeakingIdleMontageBlendOut, Resolved);
+			AnimInst->Montage_Stop(GetSpeakingIdleMontageBlendOut(), Resolved);
 			UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge [StopSpeaking]: stopped %s montage '%s'."),
 				Label, *Resolved->GetName());
 		}
@@ -3619,6 +3634,12 @@ void UGodfreyPerformerAnimationBridgeComponent::StopSpeakingBehaviour()
 	SpeakingIdleMontageCycleSeconds = 0.f;
 	SpeakingIdleMontageWallCycleSeconds = 0.f;
 	SpeakingIdleCycleStartWorldTime = -1.0;
+
+	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
+	{
+		Diag->MarkStageForCurrent(EGodfreyUtteranceStage::BodyAnimEnded);
+		Diag->SetCurrentAnimationName(TEXT("(none)"));
+	}
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::HandleListeningStarted()

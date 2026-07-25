@@ -51,6 +51,15 @@ public:
 	/** Called by the streaming async action so latency summaries can include client request start. */
 	void SetClientRequestT0PlatformSeconds(double PlatformSeconds);
 
+	/** Optional Brain requestId for SpeechId correlation (set before StartStream when known). */
+	void SetBrainRequestId(const FString& InRequestId);
+
+	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
+	FString GetSpeechId() const { return SpeechId; }
+
+	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
+	int32 GetUtteranceOrdinal() const { return UtteranceOrdinal; }
+
 	/** Called when the first HTTP body bytes reach the game-thread PCM pipeline (first FIFO batch). */
 	void NotifyFirstHttpBodyBytesPlatformSeconds(double PlatformSeconds);
 
@@ -136,6 +145,8 @@ private:
 	double FirstChunkPlatformSeconds = -1.0;
 
 	int32 UtteranceOrdinal = 0;
+	FString SpeechId;
+	FString BrainRequestId;
 	double ClientRequestT0PlatformSeconds = -1.0;
 	double StreamStartPlatformSeconds = -1.0;
 	double FirstHttpBodyBytesPlatformSeconds = -1.0;
