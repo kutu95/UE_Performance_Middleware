@@ -32,6 +32,7 @@ void UGodfreyAceWarmupComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
 	{
 		World->GetTimerManager().ClearTimer(WarmupDelayTimerHandle);
 	}
+	UGodfreyPcmStreamSession::AbortActiveStreamForCharacter(GetOwner(), TEXT("ACE warmup EndPlay"));
 	Super::EndPlay(EndPlayReason);
 }
 

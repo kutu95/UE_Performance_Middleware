@@ -1,0 +1,254 @@
+{
+  "version": 1,
+  "createdUtc": "2026-07-28T14:27:40Z",
+  "libraryPath": "/Game/Godfrey/Animation/Animation/Performances",
+  "namingConvention": {
+    "sourceAS": "AS_<CueId>",
+    "sourcePerf": "Perf_<CueId>",
+    "targetAS": "AS_<CueId>_EyeFixed",
+    "targetAM": "AM_<CueId>_EyeFixed"
+  },
+  "workflow": [
+    "Open Perf_<CueId> in MetaHuman Animator.",
+    "Apply eye correction using neutral forward gaze reference.",
+    "Export/bake corrected animation sequence as AS_<CueId>_EyeFixed.",
+    "Create AM_<CueId>_EyeFixed on DefaultSlot if montage variant is used.",
+    "Mark item status done and add notes."
+  ],
+  "items": [
+    {
+      "cue_id": "Listening_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_Listening_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_Listening_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_Listening_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_Listening_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "Listening_02",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_Listening_02",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_Listening_02",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_Listening_02_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_Listening_02_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ListeningAgreeing_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningAgreeing_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ListeningAgreeing_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningAgreeing_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ListeningAgreeing_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ListeningAttentive_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningAttentive_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ListeningAttentive_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningAttentive_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ListeningAttentive_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ListeningConcerned_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningConcerned_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ListeningConcerned_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningConcerned_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ListeningConcerned_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ListeningCurious_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningCurious_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ListeningCurious_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningCurious_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ListeningCurious_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ListeningNodding_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningNodding_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ListeningNodding_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningNodding_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ListeningNodding_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ListeningSympathetic_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningSympathetic_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ListeningSympathetic_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ListeningSympathetic_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ListeningSympathetic_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "Thinking_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_Thinking_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_Thinking_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_Thinking_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_Thinking_01_EyeFixed",
+      "status": "pending",
+      "notes": "Ready for manual eye correction pass"
+    },
+    {
+      "cue_id": "Thinking_02",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_Thinking_02",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_Thinking_02",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_Thinking_02_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_Thinking_02_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingCoy_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingCoy_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingCoy_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingCoy_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingCoy_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingDeepBreath_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingDeepBreath_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingDeepBreath_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingDeepBreath_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingDeepBreath_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingDeepBreath_02",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingDeepBreath_02",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingDeepBreath_02",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingDeepBreath_02_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingDeepBreath_02_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingHandToChin_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingHandToChin_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingHandToChin_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingHandToChin_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingHandToChin_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingLookingAway_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingLookingAway_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingLookingAway_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingLookingAway_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingLookingAway_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingLookingToSea_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingLookingToSea_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingLookingToSea_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingLookingToSea_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingLookingToSea_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingRemembering_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingRemembering_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingRemembering_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingRemembering_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingRemembering_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "ThinkingReturnGaze_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingReturnGaze_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_ThinkingReturnGaze_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_ThinkingReturnGaze_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_ThinkingReturnGaze_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "SpeakingCalmExplanation_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingCalmExplanation_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_SpeakingCalmExplanation_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingCalmExplanation_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_SpeakingCalmExplanation_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "SpeakingDescribeDistance_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingDescribeDistance_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_SpeakingDescribeDistance_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingDescribeDistance_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_SpeakingDescribeDistance_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "SpeakingDescribeSequence_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingDescribeSequence_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_SpeakingDescribeSequence_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingDescribeSequence_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_SpeakingDescribeSequence_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "SpeakingDescribeSize_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingDescribeSize_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_SpeakingDescribeSize_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingDescribeSize_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_SpeakingDescribeSize_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "SpeakingExplainDanger_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingExplainDanger_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_SpeakingExplainDanger_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingExplainDanger_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_SpeakingExplainDanger_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "SpeakingGentleEmphasis_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingGentleEmphasis_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_SpeakingGentleEmphasis_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_SpeakingGentleEmphasis_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_SpeakingGentleEmphasis_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "Concerned_01",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_Concerned_01",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_Concerned_01",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_Concerned_01_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_Concerned_01_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    },
+    {
+      "cue_id": "Concerned_02",
+      "source_as": "/Game/Godfrey/Animation/Animation/Performances/AS_Concerned_02",
+      "source_perf": "/Game/Godfrey/Animation/Animation/Performances/Perf_Concerned_02",
+      "target_as_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AS_Concerned_02_EyeFixed",
+      "target_am_eye_fixed": "/Game/Godfrey/Animation/Animation/Performances/AM_Concerned_02_EyeFixed",
+      "status": "pending",
+      "notes": "Perf source asset missing (optional)"
+    }
+  ]
+}

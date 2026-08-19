@@ -16,7 +16,7 @@ import sys
 import unreal
 
 REPORT = "GodfreyExhibitSanity.txt"
-PERFORMER_LABELS = ("BP_Godfrey_Performer", "BP_Kristofer")  # Phase 6+: prefer shell label
+PERFORMER_LABELS = ("BP_Godfrey_Performer", "BP_Kristofer", "BP_MHC_Errol")  # MHC Errol shell keeps BP_Godfrey_Performer label
 REQUIRED_LOADED = (
     "Exhibit_Floor",
     "Exhibit_Fill_Key",

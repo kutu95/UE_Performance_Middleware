@@ -7,6 +7,7 @@
 #include "ACERuntimeModule.h"
 #include "ACEBlueprintLibrary.h"
 #include "ACEAudioCurveSourceComponent.h"
+#include "Audio2FaceParameters.h"
 #include "GodfreyDiagnostics.h"
 #include "UnrealPerformerGodfreySettings.h"
 
@@ -32,7 +33,21 @@ namespace
 static int32 GGodfreyUtteranceCounter = 0;
 
 /** Bumped when parallel-audible startup logic changes — grep logs for this string to confirm binary matches source. */
-static constexpr const TCHAR* GGodfreyParallelAudibleLogicStamp = TEXT("godfrey-parallel-audible-2026-06-28-v9");
+static constexpr const TCHAR* GGodfreyParallelAudibleLogicStamp = TEXT("godfrey-parallel-audible-2026-07-30-v10-audio-thread-safe");
+
+/**
+ * FAudioDevice::GetTransientPrimaryVolume() asserts IsInAudioThread().
+ * Speak-stream diagnostics / timers run on the game thread (and crash Standalone/Game on FinishStream).
+ * Returns -1 when not readable from this thread; SetTransientPrimaryVolume remains game-thread safe.
+ */
+static float SafeGetTransientPrimaryVolume(const FAudioDevice* AudioDevice)
+{
+	if (!AudioDevice || !IsInAudioThread())
+	{
+		return -1.f;
+	}
+	return AudioDevice->GetTransientPrimaryVolume();
+}
 
 /** PrimaryVolume = TransientPrimaryVolume * FApp::GetVolumeMultiplier(). AppMult=0 when the editor is unfocused. */
 static bool TryRestorePieAudibilityIfSilent(UWorld* World, const TCHAR* Context)
@@ -50,7 +65,7 @@ static bool TryRestorePieAudibilityIfSilent(UWorld* World, const TCHAR* Context)
 	}
 
 	const float PrimaryVol = AudioDevice->GetPrimaryVolume();
-	const float TransientVol = AudioDevice->GetTransientPrimaryVolume();
+	const float TransientVol = SafeGetTransientPrimaryVolume(AudioDevice);
 	const float AppMult = FApp::GetVolumeMultiplier();
 	const float UnfocusedMult = FApp::GetUnfocusedVolumeMultiplier();
 	const bool bDeviceMuted = AudioDevice->IsAudioDeviceMuted();
@@ -92,7 +107,9 @@ static bool TryRestorePieAudibilityIfSilent(UWorld* World, const TCHAR* Context)
 		bRestored = true;
 	}
 
-	if (TransientVol <= KINDA_SMALL_NUMBER || PrimaryVol <= KINDA_SMALL_NUMBER)
+	// TransientVol < 0 means unread (wrong thread); fall back to PrimaryVol for the restore decision.
+	const bool bTransientKnownSilent = TransientVol >= 0.f && TransientVol <= KINDA_SMALL_NUMBER;
+	if (bTransientKnownSilent || PrimaryVol <= KINDA_SMALL_NUMBER)
 	{
 		AudioDevice->SetTransientPrimaryVolume(1.f);
 		bRestored = true;
@@ -292,6 +309,24 @@ void UGodfreyPcmStreamSession::BeginDestroy()
 	Super::BeginDestroy();
 }
 
+bool UGodfreyPcmStreamSession::IsCharacterAudiblePlaybackActive(const AActor* Character)
+{
+	if (!IsValid(Character))
+	{
+		return false;
+	}
+
+	const TWeakObjectPtr<AActor> Key(const_cast<AActor*>(Character));
+	if (const TWeakObjectPtr<UGodfreyPcmStreamSession>* Existing = GActiveGodfreyAceSessionByCharacter.Find(Key))
+	{
+		if (const UGodfreyPcmStreamSession* Session = Existing->Get())
+		{
+			return !Session->HasAcePlaybackEnded();
+		}
+	}
+	return false;
+}
+
 void UGodfreyPcmStreamSession::RegisterAsActiveAceSessionForCharacter()
 {
 	AActor* Character = TargetCharacter.Get();
@@ -386,6 +421,7 @@ void UGodfreyPcmStreamSession::CancelDeferredAceUnbind()
 	DeferredAceUnbindWorld.Reset();
 	DeferredAceUnbindTimerHandle.Invalidate();
 	bDeferredAceUnbindActive = false;
+	DeferredUnbindFinishStreamPlatformSeconds = 0.0;
 }
 
 void UGodfreyPcmStreamSession::ScheduleDeferredAceUnbindAfterFinishStream(UWorld* World, const double FinishStreamPlatformSeconds)
@@ -401,18 +437,67 @@ void UGodfreyPcmStreamSession::ScheduleDeferredAceUnbindAfterFinishStream(UWorld
 		return;
 	}
 
-	CancelDeferredAceUnbind();
-
-	bDeferredAceUnbindActive = true;
-	DeferredUnbindUtteranceOrdinal = UtteranceOrdinal;
-	DeferredUnbindStartPlatformSeconds = FPlatformTime::Seconds();
 	DeferredUnbindFinishStreamPlatformSeconds = FinishStreamPlatformSeconds;
-	DeferredAceUnbindWorld = World;
+	DeferredUnbindStartPlatformSeconds = FPlatformTime::Seconds();
+	DeferredUnbindUtteranceOrdinal = UtteranceOrdinal;
+
+	const float ExpectedSec = (StreamSampleRate > 0)
+		? static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate)
+		: 0.f;
+	float RemainingSec = ExpectedSec;
+	if (AActor* Character = TargetCharacter.Get())
+	{
+		if (UACEAudioCurveSourceComponent* AceComp = Character->FindComponentByClass<UACEAudioCurveSourceComponent>())
+		{
+			const float Wall = AceComp->GetProceduralPlaybackWallClockSeconds();
+			RemainingSec = FMath::Max(0.f, ExpectedSec - Wall);
+		}
+	}
 
 	UE_LOG(LogGodfreyPcmStream, Log,
 		TEXT("Godfrey utterance %d: ACE delegates left bound until OnAnimationEnded (ingest complete; playback may continue ~%.1fs)."),
 		UtteranceOrdinal,
-		(StreamSampleRate > 0) ? static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate) : 0.f);
+		RemainingSec);
+
+	EnsureAudioEndWatchdogScheduled(World);
+}
+
+void UGodfreyPcmStreamSession::EnsureAudioEndWatchdogScheduled(UWorld* World)
+{
+	if (!World || (!bBoundAceAnimationStarted && !bBoundAceAnimationEnded))
+	{
+		return;
+	}
+
+	if (bAcePlaybackEndedObserved)
+	{
+		return;
+	}
+
+	if (bDeferredAceUnbindActive
+		&& DeferredAceUnbindWorld.Get() == World
+		&& DeferredUnbindUtteranceOrdinal == UtteranceOrdinal)
+	{
+		return;
+	}
+
+	// Preserve FinishStream timestamp across reschedule — CancelDeferredAceUnbind clears it and
+	// would permanently disable never-started / hard-timeout failovers (mic stays paused forever).
+	const double PreservedFinishStreamPlatformSeconds = DeferredUnbindFinishStreamPlatformSeconds;
+	const double PreservedStartPlatformSeconds = DeferredUnbindStartPlatformSeconds;
+
+	CancelDeferredAceUnbind();
+
+	DeferredUnbindFinishStreamPlatformSeconds = PreservedFinishStreamPlatformSeconds;
+	DeferredUnbindStartPlatformSeconds = PreservedStartPlatformSeconds;
+
+	bDeferredAceUnbindActive = true;
+	DeferredUnbindUtteranceOrdinal = UtteranceOrdinal;
+	if (DeferredUnbindStartPlatformSeconds <= 0.0)
+	{
+		DeferredUnbindStartPlatformSeconds = FPlatformTime::Seconds();
+	}
+	DeferredAceUnbindWorld = World;
 
 	World->GetTimerManager().SetTimer(
 		DeferredAceUnbindTimerHandle,
@@ -445,26 +530,58 @@ void UGodfreyPcmStreamSession::ProcessDeferredAceUnbindTick()
 		return;
 	}
 
+	// Fail fast if ACE never starts audible/lipsync clock after ingest — no silent parallel substitute.
+	// Cap never-started wait so mic/lantern cannot stay Wait for the full 10s post-finish grace.
+	const float NeverStartedGraceSeconds = FMath::Clamp(GraceSeconds, 0.5f, 2.0f);
+	if (bFinished
+		&& !UtteranceStartupMetrics.bAceOnAnimationStartedObserved
+		&& NeverStartedGraceSeconds > 0.f
+		&& DeferredUnbindFinishStreamPlatformSeconds > 0.0
+		&& (Now - DeferredUnbindFinishStreamPlatformSeconds) >= static_cast<double>(NeverStartedGraceSeconds))
+	{
+		const FString Err = FString::Printf(
+			TEXT("Godfrey utterance %d FAILED: ACE OnAnimationStarted never fired within %.1fs after FinishStream (ACE-only single clock; no parallel fallback). Check ACE Play()/BufferLength/MinBlendShapeSamples."),
+			DeferredUnbindUtteranceOrdinal,
+			NeverStartedGraceSeconds);
+		UE_LOG(LogGodfreyPcmStream, Error, TEXT("%s"), *Err);
+		ReportError(Err);
+		OnPlaybackEnded.Broadcast();
+		bAcePlaybackEndedObserved = true;
+		CancelDeferredAceUnbind();
+		UnbindAceDelegates();
+		return;
+	}
+
+	// Prefer ending when ACE's own playback wall catches MaxCurveTs / PCM duration — OnAnimationEnded is unreliable.
+	if (TryCompleteAcePlaybackFromAudioEndWatchdog())
+	{
+		return;
+	}
+
+	// Hard timeout only after FinishStream (ingest complete).
+	if (!bFinished || DeferredUnbindFinishStreamPlatformSeconds <= 0.0)
+	{
+		return;
+	}
+
 	const double ExpectedPlaybackSec = (StreamSampleRate > 0)
 		? static_cast<double>(TotalSamplesSentToAce) / static_cast<double>(StreamSampleRate)
 		: 30.0;
 	const double TimeoutSec = FMath::Max(static_cast<double>(GraceSeconds), ExpectedPlaybackSec + 5.0);
-	const double Elapsed = Now - DeferredUnbindStartPlatformSeconds;
+	const double Elapsed = Now - DeferredUnbindFinishStreamPlatformSeconds;
 
 	if (Elapsed < TimeoutSec)
 	{
 		return;
 	}
 
-	UE_LOG(LogGodfreyPcmStream, Warning,
-		TEXT("Godfrey utterance %d: OnAnimationEnded did not arrive within %.1fs (expected playback ~%.1fs); forcing OnPlaybackEnded and unbinding ACE delegates."),
+	UE_LOG(LogGodfreyPcmStream, Error,
+		TEXT("Godfrey utterance %d FAILED: OnAnimationEnded did not arrive within %.1fs (expected playback ~%.1fs); forcing OnPlaybackEnded — investigate ACE hang (no silent fallback)."),
 		DeferredUnbindUtteranceOrdinal,
 		Elapsed,
 		ExpectedPlaybackSec);
 
-	OnPlaybackEnded.Broadcast();
-	CancelDeferredAceUnbind();
-	UnbindAceDelegates();
+	CompleteAcePlaybackEnded(TEXT("hard-timeout (OnAnimationEnded never arrived)"));
 }
 
 void UGodfreyPcmStreamSession::ApplyGodfreyAcePlaybackPriming(UACEAudioCurveSourceComponent* AceComp)
@@ -530,6 +647,129 @@ void UGodfreyPcmStreamSession::ApplyGodfreyAcePlaybackPriming(UACEAudioCurveSour
 	}
 }
 
+float UGodfreyPcmStreamSession::GetUnmatchedAudioSeconds() const
+{
+	if (!bStreamStarted || StreamSampleRate <= 0)
+	{
+		return 0.f;
+	}
+
+	const AActor* Character = TargetCharacter.Get();
+	if (!Character)
+	{
+		return 0.f;
+	}
+
+	const UACEAudioCurveSourceComponent* AceComp = Character->FindComponentByClass<UACEAudioCurveSourceComponent>();
+	if (!AceComp)
+	{
+		return 0.f;
+	}
+
+	const float SentAudioSec = static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate);
+	const float MaxCurveTs = FMath::Max(0.f, AceComp->GetMaxReceivedCurveTimestamp());
+	return SentAudioSec - MaxCurveTs;
+}
+
+float UGodfreyPcmStreamSession::GetSentAudioSeconds() const
+{
+	if (!bStreamStarted || StreamSampleRate <= 0)
+	{
+		return 0.f;
+	}
+	return static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate);
+}
+
+float UGodfreyPcmStreamSession::GetPlaybackWallSeconds() const
+{
+	const AActor* Character = TargetCharacter.Get();
+	const UACEAudioCurveSourceComponent* AceComp = Character
+		? Character->FindComponentByClass<UACEAudioCurveSourceComponent>()
+		: nullptr;
+	if (!AceComp)
+	{
+		return -1.f;
+	}
+	return AceComp->GetProceduralPlaybackWallClockSeconds();
+}
+
+bool UGodfreyPcmStreamSession::ShouldDeferEndAudioSamplesForCurveCatchUp() const
+{
+	if (!bStreamStarted || bFinished)
+	{
+		return false;
+	}
+
+	// Streaming A2F holds back the final curves until EndAudioSamples tells it the stream ended,
+	// so "wait for curves before ending the stream" is circular and the tail plays uncovered.
+	if (!GetDefault<UUnrealPerformerGodfreySettings>()->bGodfreyDeferEndAudioSamplesForCurveCatchUp)
+	{
+		return false;
+	}
+
+	// Only defer when audible/lipsync is already running — End may still be required to promote first Play().
+	if (!UtteranceStartupMetrics.bAceOnAnimationStartedObserved)
+	{
+		return false;
+	}
+
+	const AActor* Character = TargetCharacter.Get();
+	const UACEAudioCurveSourceComponent* AceComp = Character
+		? Character->FindComponentByClass<UACEAudioCurveSourceComponent>()
+		: nullptr;
+	if (!AceComp || !AceComp->IsProceduralAudioPlaying())
+	{
+		return false;
+	}
+
+	const float SentAudioSec = (StreamSampleRate > 0)
+		? static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate)
+		: 0.f;
+	const float Wall = AceComp->GetProceduralPlaybackWallClockSeconds();
+
+	// Wall has already played all sent PCM, so curves will not catch up on their own and
+	// EndAudioSamples has to flush them synchronously — measured at 100-290 ms on the game
+	// thread, landing in the last syllable. Hold it until the audio-end watchdog has
+	// completed playback and muted ACE, so that hitch falls in silence instead. The
+	// watchdog polls every 50 ms and its wall-past-all-sent-samples rule is satisfied by
+	// this same condition, so this waits about one tick rather than underrunning at
+	// Volume=1.
+	if (SentAudioSec > 0.25f && Wall >= (SentAudioSec - 0.05f))
+	{
+		return !bAcePlaybackEndedObserved;
+	}
+
+	const float Threshold = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyAceEndAudioMaxUnmatchedSeconds;
+	return GetUnmatchedAudioSeconds() > Threshold;
+}
+
+bool UGodfreyPcmStreamSession::ShouldForceEndAudioSamplesDespiteCatchUpLag(const float CatchUpElapsedSeconds) const
+{
+	const float Unmatched = GetUnmatchedAudioSeconds();
+	const float Threshold = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyAceEndAudioMaxUnmatchedSeconds;
+	if (Unmatched <= Threshold)
+	{
+		return true;
+	}
+
+	const float Sent = GetSentAudioSeconds();
+	const float Wall = GetPlaybackWallSeconds();
+	// Near the audible end: hitch lands in the last ~1–2s / silence instead of mid-speech.
+	if (Sent > 5.f && Wall >= 0.f && Wall >= (Sent - FMath::Max(1.5f, Threshold + 0.5f)))
+	{
+		return true;
+	}
+
+	// Absolute safety if A2F stalls — do not use the short 3s config timeout for long occasion floods.
+	constexpr float AbsoluteSafetySeconds = 120.f;
+	if (CatchUpElapsedSeconds >= AbsoluteSafetySeconds)
+	{
+		return true;
+	}
+
+	return false;
+}
+
 int32 UGodfreyPcmStreamSession::GetEffectiveIngestPushBudget(int32 ConfigBudget, bool bAllowOverrun) const
 {
 	const int32 ClampedConfigBudget = FMath::Max(1, ConfigBudget);
@@ -556,9 +796,7 @@ int32 UGodfreyPcmStreamSession::GetEffectiveIngestPushBudget(int32 ConfigBudget,
 		return ClampedConfigBudget;
 	}
 
-	const float SentAudioSec = static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate);
-	const float MaxCurveTs = AceComp->GetMaxReceivedCurveTimestamp();
-	const float UnmatchedSec = SentAudioSec - FMath::Max(0.f, MaxCurveTs);
+	const float UnmatchedSec = GetUnmatchedAudioSeconds();
 
 	const float TightThresholdSec = Settings->GodfreyAceMaxUnmatchedAudioSeconds;
 	const float MediumThresholdSec = FMath::Min(
@@ -567,6 +805,8 @@ int32 UGodfreyPcmStreamSession::GetEffectiveIngestPushBudget(int32 ConfigBudget,
 
 	if (UnmatchedSec >= TightThresholdSec)
 	{
+		// Keep at least 1 push/tick so final PCM can still drain (budget 0 deadlocks FinishStream).
+		// Pair with 50ms drain delay so ingest stays near real-time instead of flooding A2F.
 		return 1;
 	}
 
@@ -626,12 +866,14 @@ void UGodfreyPcmStreamSession::LogAudiblePlaybackDiagnostics(const TCHAR* Contex
 
 	int32 MixerSampleRate = 0;
 	int32 MixerOutputChannels = 0;
+	FString MixerDeviceName;
 	if (World)
 	{
 		if (const Audio::FMixerDevice* Mixer = FAudioDeviceManager::GetAudioMixerDeviceFromWorldContext(World))
 		{
 			MixerSampleRate = Mixer->GetDeviceSampleRate();
 			MixerOutputChannels = Mixer->GetDeviceOutputChannels();
+			MixerDeviceName = Mixer->GetPlatformDeviceInfo().Name;
 		}
 	}
 
@@ -689,7 +931,7 @@ void UGodfreyPcmStreamSession::LogAudiblePlaybackDiagnostics(const TCHAR* Contex
 			{
 				bAudioDeviceMuted = AudioDevice->IsAudioDeviceMuted();
 				PrimaryVolume = AudioDevice->GetPrimaryVolume();
-				TransientPrimaryVolume = AudioDevice->GetTransientPrimaryVolume();
+				TransientPrimaryVolume = SafeGetTransientPrimaryVolume(AudioDevice);
 			}
 		}
 	}
@@ -702,8 +944,9 @@ void UGodfreyPcmStreamSession::LogAudiblePlaybackDiagnostics(const TCHAR* Contex
 		bFinished ? 1 : 0);
 
 	UE_LOG(LogGodfreyPcmStream, Log,
-		TEXT("[Godfrey audible diag] %s | Mixer DeviceId=%u MixerSR=%d MixerOutCh=%d UpsampleToMixer=%d StreamSR=%d StreamCh=%d DeviceMuted=%d PrimaryVol=%.3f TransientVol=%.3f AppMult=%.3f EnableGameSound=%d"),
+		TEXT("[Godfrey audible diag] %s | Mixer Device='%s' DeviceId=%u MixerSR=%d MixerOutCh=%d UpsampleToMixer=%d StreamSR=%d StreamCh=%d DeviceMuted=%d PrimaryVol=%.3f TransientVol=%.3f AppMult=%.3f EnableGameSound=%d"),
 		ContextLabel,
+		MixerDeviceName.IsEmpty() ? TEXT("(unknown)") : *MixerDeviceName,
 		static_cast<uint32>(DeviceId),
 		MixerSampleRate,
 		MixerOutputChannels,
@@ -715,6 +958,15 @@ void UGodfreyPcmStreamSession::LogAudiblePlaybackDiagnostics(const TCHAR* Contex
 		TransientPrimaryVolume,
 		AppVolumeMultiplier,
 		bEnableGameSound ? 1 : 0);
+
+	if (MixerDeviceName.Contains(TEXT("EPSON"), ESearchCase::IgnoreCase)
+		|| MixerDeviceName.Contains(TEXT("NVIDIA High Definition Audio"), ESearchCase::IgnoreCase))
+	{
+		UE_LOG(LogGodfreyPcmStream, Log,
+			TEXT("[Godfrey audible diag] %s | Mixer output '%s'."),
+			ContextLabel,
+			*MixerDeviceName);
+	}
 
 	if (PrimaryVolume <= KINDA_SMALL_NUMBER && !bAudioDeviceMuted)
 	{
@@ -790,11 +1042,15 @@ void UGodfreyPcmStreamSession::LogAudiblePlaybackDiagnostics(const TCHAR* Contex
 		float RollingRms = 0.f;
 		ComputePcm16PeakRms(RollingPcmBytes, StreamNumChannels, RollingPeak, RollingRms);
 		UE_LOG(LogGodfreyPcmStream, Log,
-			TEXT("[Godfrey audible diag] %s | RollingPcmBytes=%d streamPeak=%d streamRms=%.1f (source SR=%d before upsample)"),
+			TEXT("[Godfrey audible diag] %s | RollingPcmBytes=%d streamPeak=%d streamRms=%.1f (post-gain x%.2f, saturated=%lld gated=%lld gate=%d, source SR=%d before upsample)"),
 			ContextLabel,
 			RollingPcmBytes.Num(),
 			static_cast<int32>(RollingPeak),
 			RollingRms,
+			GetDefault<UUnrealPerformerGodfreySettings>()->GodfreySpeechPcmGain,
+			SpeechGainSaturatedSampleCount,
+			SpeechSilenceGatedSampleCount,
+			GetDefault<UUnrealPerformerGodfreySettings>()->GodfreySpeechSilenceGate,
 			StreamSampleRate);
 		if (RollingPeak == 0)
 		{
@@ -853,7 +1109,8 @@ void UGodfreyPcmStreamSession::AudibleDiagnosticsTimerTick()
 		{
 			if (FAudioDevice* AudioDevice = DeviceHandle.GetAudioDevice())
 			{
-				if (AudioDevice->GetTransientPrimaryVolume() <= KINDA_SMALL_NUMBER)
+				// GetTransientPrimaryVolume asserts off the audio thread; PrimaryVolume is safe here.
+				if (AudioDevice->GetPrimaryVolume() <= KINDA_SMALL_NUMBER)
 				{
 					AudioDevice->SetTransientPrimaryVolume(1.f);
 				}
@@ -1035,11 +1292,6 @@ void UGodfreyPcmStreamSession::UpdateParallelAudibleWaveDuration()
 
 void UGodfreyPcmStreamSession::MuteAceVolumeForParallelLipSyncOnly()
 {
-	if (bAceVolumeMutedForParallelLipSync)
-	{
-		return;
-	}
-
 	AActor* Character = TargetCharacter.Get();
 	if (!Character)
 	{
@@ -1058,6 +1310,7 @@ void UGodfreyPcmStreamSession::MuteAceVolumeForParallelLipSyncOnly()
 		bSavedAceVolumeForParallelMute = true;
 	}
 
+	// Always re-apply: ACE Play()/OnAnimationStarted can restore Volume after an earlier mute.
 	AceComp->Volume = 0.f;
 	bAceVolumeMutedForParallelLipSync = true;
 }
@@ -1522,7 +1775,29 @@ void UGodfreyPcmStreamSession::HandleAceAnimationStarted()
 
 	if (!bParallelAudiblePlaybackStarted)
 	{
-		TryStartParallelAudiblePlayback(true, false);
+		if (bParallelAudibleActive)
+		{
+			ReportError(FString::Printf(
+				TEXT("Godfrey utterance %d: parallel audible was active but never started — dual-clock path is disabled; fix config (bGodfreyUseParallelPcmAudiblePlayback=0)."),
+				UtteranceOrdinal));
+			return;
+		}
+		// ACE-only: OnAnimationStarted is the single audible + lipsync clock. No parallel start.
+	}
+
+	if (AActor* Character = TargetCharacter.Get())
+	{
+		if (UACEAudioCurveSourceComponent* AceComp = Character->FindComponentByClass<UACEAudioCurveSourceComponent>())
+		{
+			if (AceComp->Volume <= KINDA_SMALL_NUMBER)
+			{
+				ReportError(FString::Printf(
+					TEXT("Godfrey utterance %d: OnAnimationStarted but ACE Volume=%.4f — lipsync would run with silent/wrong audio. Aborting."),
+					UtteranceOrdinal,
+					AceComp->Volume));
+				return;
+			}
+		}
 	}
 
 	if (bDeferredAceUnbindActive && bFinished && (DeferredUnbindUtteranceOrdinal == UtteranceOrdinal))
@@ -1578,15 +1853,30 @@ void UGodfreyPcmStreamSession::HandleAceAnimationStarted()
 
 	UE_LOG(LogGodfreyPcmStream, Log,
 		TEXT("Facial animation pipeline active in sync with ACE audio clock (OnPlaybackStarted + OnLipSyncStarted broadcast)."));
+
+	// Arm audio-end poll immediately so EndSpeaking is not gated on late FinishStream.
+	if (AActor* CharacterForWatchdog = TargetCharacter.Get())
+	{
+		if (UWorld* World = CharacterForWatchdog->GetWorld())
+		{
+			EnsureAudioEndWatchdogScheduled(World);
+		}
+	}
 }
 
-void UGodfreyPcmStreamSession::HandleAceAnimationEnded()
+void UGodfreyPcmStreamSession::CompleteAcePlaybackEnded(const TCHAR* Reason)
 {
 	if (!IsActiveAceSessionForCharacter())
 	{
 		UE_LOG(LogGodfreyPcmStream, Verbose,
-			TEXT("Godfrey utterance %d: ignoring stale OnAnimationEnded (superseded by a newer session on the same character)."),
-			UtteranceOrdinal);
+			TEXT("Godfrey utterance %d: ignoring stale playback-end (%s) — superseded by a newer session on the same character."),
+			UtteranceOrdinal,
+			Reason ? Reason : TEXT("unknown"));
+		return;
+	}
+
+	if (bAcePlaybackEndedObserved)
+	{
 		return;
 	}
 
@@ -1603,11 +1893,31 @@ void UGodfreyPcmStreamSession::HandleAceAnimationEnded()
 	}
 
 	UE_LOG(LogGodfreyPcmStream, Log,
-		TEXT("Godfrey utterance %d: OnAnimationEnded — ACE playback complete (audible + curves). WorldTime=%.6f PlatformTime=%.6f SamplesSentToACE=%lld"),
+		TEXT("Godfrey utterance %d: ACE playback complete (%s). WorldTime=%.6f PlatformTime=%.6f SamplesSentToACE=%lld"),
 		UtteranceOrdinal,
+		Reason ? Reason : TEXT("unknown"),
 		WorldNow,
 		PlatformNow,
 		TotalSamplesSentToAce);
+
+	// Mute + Stop: Volume=0 alone leaves ACE applying flushed blendshapes after audible audio
+	// ends (lip-sync continues for the withheld ~0.8s+ tail). Stop() detaches the consumer
+	// and clears BSWeightSamples so the face settles with the voice.
+	if (AActor* CharacterForMute = TargetCharacter.Get())
+	{
+		if (UACEAudioCurveSourceComponent* AceComp = CharacterForMute->FindComponentByClass<UACEAudioCurveSourceComponent>())
+		{
+			UE_LOG(LogGodfreyPcmStream, Log,
+				TEXT("Godfrey utterance %d: stopping ACE curves on playback-complete (was Volume=%.3f ProceduralPlaying=%d)."),
+				UtteranceOrdinal,
+				AceComp->Volume,
+				AceComp->IsProceduralAudioPlaying() ? 1 : 0);
+			AceComp->Volume = 0.f;
+			AceComp->RequestRestPose();
+			AceComp->Stop();
+			AceComp->Volume = 1.f;
+		}
+	}
 
 	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(TargetCharacter.Get()))
 	{
@@ -1617,7 +1927,7 @@ void UGodfreyPcmStreamSession::HandleAceAnimationEnded()
 
 	OnPlaybackEnded.Broadcast();
 
-	LogAudiblePlaybackDiagnostics(TEXT("OnAnimationEnded"));
+	LogAudiblePlaybackDiagnostics(Reason ? Reason : TEXT("AcePlaybackEnded"));
 	StopParallelAudiblePlayback(true);
 
 	if (bDeferredAceUnbindActive && bFinished && (DeferredUnbindUtteranceOrdinal == UtteranceOrdinal))
@@ -1625,6 +1935,176 @@ void UGodfreyPcmStreamSession::HandleAceAnimationEnded()
 		CancelDeferredAceUnbind();
 		UnbindAceDelegates();
 	}
+}
+
+bool UGodfreyPcmStreamSession::TryCompleteAcePlaybackFromAudioEndWatchdog()
+{
+	if (bAcePlaybackEndedObserved || !UtteranceStartupMetrics.bAceOnAnimationStartedObserved)
+	{
+		return false;
+	}
+
+	AActor* Character = TargetCharacter.Get();
+	UACEAudioCurveSourceComponent* AceComp = Character ? Character->FindComponentByClass<UACEAudioCurveSourceComponent>() : nullptr;
+	if (!AceComp)
+	{
+		return false;
+	}
+
+	const float Wall = AceComp->GetProceduralPlaybackWallClockSeconds();
+	const float MaxTs = AceComp->GetMaxReceivedCurveTimestamp();
+	const bool bProceduralPlaying = AceComp->IsProceduralAudioPlaying();
+
+	// ACE returns -1 (not a frozen final value) once procedural playback stops, so the raw Wall
+	// cannot be compared against the audio duration on the very tick that playback ends. Keep the
+	// last real reading so the "procedural stopped" branch below still has a position to judge.
+	if (Wall > LastPositiveProceduralWallSeconds)
+	{
+		LastPositiveProceduralWallSeconds = Wall;
+	}
+	const float EffectiveWall = (Wall >= 0.f) ? Wall : LastPositiveProceduralWallSeconds;
+
+	const double ExpectedFromSamples = (StreamSampleRate > 0)
+		? static_cast<double>(TotalSamplesSentToAce) / static_cast<double>(StreamSampleRate)
+		: 0.0;
+	const float UnmatchedSec = (ExpectedFromSamples > 0.0)
+		? static_cast<float>(ExpectedFromSamples) - MaxTs
+		: 0.f;
+
+	const double Now = FPlatformTime::Seconds();
+	if (MaxTs > LastObservedMaxCurveTs + 0.01f)
+	{
+		LastObservedMaxCurveTs = MaxTs;
+		MaxCurveTsLastChangePlatformSeconds = Now;
+	}
+	else if (MaxCurveTsLastChangePlatformSeconds < 0.0 && MaxTs > 0.f)
+	{
+		LastObservedMaxCurveTs = MaxTs;
+		MaxCurveTsLastChangePlatformSeconds = Now;
+	}
+
+	constexpr float EpsilonSec = 0.08f;
+	constexpr float MaxTsStableSec = 0.35f;
+	constexpr float PushQuietSec = 0.50f;
+	const float UnmatchedGateSec = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyAceEndAudioMaxUnmatchedSeconds;
+
+	// Completing playback hard-mutes ACE, so "all sent audio has played" must never be satisfied
+	// early: EpsilonSec slack ends the utterance up to 80 ms before the last sample is heard,
+	// which clips the closing syllable and clicks as Volume drops on a non-zero sample. Require
+	// the playback clock to pass the sent duration, plus a margin for clock granularity.
+	constexpr float SentAudioTailMarginSec = 0.03f;
+	const bool bWallPastSentAudio =
+		(Wall >= static_cast<float>(ExpectedFromSamples) + SentAudioTailMarginSec);
+
+	const bool bMaxTsStable = (MaxCurveTsLastChangePlatformSeconds > 0.0)
+		&& ((Now - MaxCurveTsLastChangePlatformSeconds) >= MaxTsStableSec);
+	const bool bPushQuiet = bFinished
+		|| (LastSamplePushPlatformSeconds > 0.0 && (Now - LastSamplePushPlatformSeconds) >= PushQuietSec);
+
+	// A 0.5s LLM/TTS gap used to look like end-of-speech (CaughtQuiet + WallPastSamples) while
+	// HTTP was still open. Marcia 2026-08-17 "tell me something you wouldn't know": watchdog
+	// fired at 1.04s sent / Finished=0, remaining PCM was discarded, then R10 stole the turn.
+	if (!bFinished)
+	{
+		return false;
+	}
+
+	const double LastVoiceSec = (StreamSampleRate > 0)
+		? static_cast<double>(LastNonSilentSamplesSentToAce) / static_cast<double>(StreamSampleRate)
+		: 0.0;
+	constexpr float VoiceEndLeadSec = 0.18f;
+	const bool bPastLastVoice =
+		(LastVoiceSec > 0.35)
+		&& (Wall >= static_cast<float>(LastVoiceSec) - VoiceEndLeadSec);
+
+	const double LastGateSec = (StreamSampleRate > 0)
+		? static_cast<double>(LastGate750SamplesSentToAce) / static_cast<double>(StreamSampleRate)
+		: 0.0;
+
+	// Trailing TTS hush / breath still has A2F visemes. Stop at last voiced RMS window, not the
+	// last sample above the silence gate (that gate is too low and leaves ~200–400ms of chewing).
+	if (bPastLastVoice)
+	{
+		AceComp->RequestRestPose();
+		if (!bLoggedAceRestPoseThisUtterance)
+		{
+			bLoggedAceRestPoseThisUtterance = true;
+			UE_LOG(LogGodfreyPcmStream, Log,
+				TEXT("Godfrey utterance %d: rest visemes at last voice (Wall=%.3f LastVoice=%.3f LastVoiceGate=%.3f ExpectedSamples=%.3f Peak=%d RmsFloor=%d)."),
+				UtteranceOrdinal,
+				Wall,
+				LastVoiceSec,
+				LastGateSec,
+				ExpectedFromSamples,
+				SpeechPeakAbsSentToAce,
+				LastVoiceRmsFloorUsed);
+		}
+		CompleteAcePlaybackEnded(TEXT("ACE last-voice rest (trailing hush visemes)"));
+		return true;
+	}
+
+	// Curves still lagging sent PCM: MaxTs can plateau mid-utterance — do NOT treat Wall≈MaxTs as end.
+	const bool bCurvesCaughtUp = UnmatchedSec <= UnmatchedGateSec;
+	const bool bPlayedAllSentSamples = (ExpectedFromSamples <= 0.2) || bWallPastSentAudio;
+
+	const bool bCaughtMaxCurve = bCurvesCaughtUp
+		&& bPlayedAllSentSamples
+		&& (MaxTs > 0.2f)
+		&& bMaxTsStable
+		&& (Wall >= (MaxTs - EpsilonSec));
+
+	const bool bMaxTsAgreesWithSamples =
+		(MaxTs <= 0.2f) || (MaxTs <= static_cast<float>(ExpectedFromSamples * 1.15) + 0.25f);
+	const bool bCaughtSamples =
+		bMaxTsAgreesWithSamples
+		&& (ExpectedFromSamples > 0.2)
+		&& bWallPastSentAudio;
+
+	const bool bWallPastAllSentSamples =
+		bPushQuiet
+		&& (ExpectedFromSamples > 0.5)
+		&& bWallPastSentAudio;
+
+	// Audio already silent: do not wait for leftover A2F curves (EndAudio flush / unmatched
+	// backlog) — those keep driving lip-sync after the voice has stopped.
+	const bool bProceduralStoppedNearEnd =
+		!bProceduralPlaying
+		&& (EffectiveWall > 0.35f)
+		&& bPushQuiet
+		&& (bWallPastSentAudio
+			|| ((ExpectedFromSamples > 0.5)
+				&& (EffectiveWall >= static_cast<float>(ExpectedFromSamples * 0.92f))));
+
+	if (!bCaughtMaxCurve && !bCaughtSamples && !bWallPastAllSentSamples
+		&& !bProceduralStoppedNearEnd)
+	{
+		return false;
+	}
+
+	UE_LOG(LogGodfreyPcmStream, Warning,
+		TEXT("Godfrey utterance %d: OnAnimationEnded missing — ACE audio-end watchdog firing (Wall=%.3f EffWall=%.3f MaxCurveTs=%.3f ExpectedSamples=%.3f LastVoice=%.3f Unmatched=%.3f ProceduralPlaying=%d Finished=%d CaughtMax=%d CaughtSamples=%d CaughtQuiet=0 WallPastSamples=%d ProceduralNearEnd=%d PastLastVoice=%d)."),
+		UtteranceOrdinal,
+		Wall,
+		EffectiveWall,
+		MaxTs,
+		ExpectedFromSamples,
+		LastVoiceSec,
+		UnmatchedSec,
+		bProceduralPlaying ? 1 : 0,
+		bFinished ? 1 : 0,
+		bCaughtMaxCurve ? 1 : 0,
+		bCaughtSamples ? 1 : 0,
+		bWallPastAllSentSamples ? 1 : 0,
+		bProceduralStoppedNearEnd ? 1 : 0,
+		bPastLastVoice ? 1 : 0);
+
+	CompleteAcePlaybackEnded(TEXT("ACE audio-end watchdog (OnAnimationEnded missing)"));
+	return true;
+}
+
+void UGodfreyPcmStreamSession::HandleAceAnimationEnded()
+{
+	CompleteAcePlaybackEnded(TEXT("OnAnimationEnded"));
 }
 
 bool UGodfreyPcmStreamSession::StartStream(UObject* WorldContextObject, AActor* CharacterForAce, FName ProviderName, int32 SampleRate, int32 NumChannels)
@@ -1668,8 +2148,11 @@ bool UGodfreyPcmStreamSession::StartStream(UObject* WorldContextObject, AActor* 
 
 	if (AceComp->Volume <= KINDA_SMALL_NUMBER)
 	{
-		UE_LOG(LogGodfreyPcmStream, Warning,
-			TEXT("UACEAudioCurveSourceComponent::Volume is near zero (%.4f). Audible ACE playback may be silent; increase Volume on the component for speech."), AceComp->Volume);
+		UE_LOG(LogGodfreyPcmStream, Error,
+			TEXT("StartStream: ACE Volume was %.4f on %s — restoring to 1.0 for ACE-only single clock (likely leftover mute from deprecated parallel path)."),
+			AceComp->Volume,
+			*CharacterForAce->GetName());
+		AceComp->Volume = 1.f;
 	}
 
 	CancelDeferredAceUnbind();
@@ -1681,6 +2164,19 @@ bool UGodfreyPcmStreamSession::StartStream(UObject* WorldContextObject, AActor* 
 	StreamSampleRate = SampleRate;
 	StreamNumChannels = NumChannels;
 	TotalSamplesSentToAce = 0;
+	LastSamplePushPlatformSeconds = -1.0;
+	LastObservedMaxCurveTs = -1.f;
+	MaxCurveTsLastChangePlatformSeconds = -1.0;
+	SpeechGainSaturatedSampleCount = 0;
+	SpeechSilenceGatedSampleCount = 0;
+	LastNonSilentSamplesSentToAce = 0;
+	LastGate750SamplesSentToAce = 0;
+	SpeechPeakAbsSentToAce = 0;
+	LastVoiceRmsFloorUsed = 0;
+	bLoggedSpeechGainThisUtterance = false;
+	bLoggedAceFaceParamsThisUtterance = false;
+	bLoggedAceRestPoseThisUtterance = false;
+	AceFaceParameters = nullptr;
 	RollingPcmBytes.Reset();
 	bLoggedFirstPcmChunk = false;
 	FirstChunkWorldTimeSeconds = -1.0;
@@ -1714,6 +2210,7 @@ bool UGodfreyPcmStreamSession::StartStream(UObject* WorldContextObject, AActor* 
 	UtteranceStartupMetrics.UtteranceOrdinal = UtteranceOrdinal;
 	UtteranceStartupMetrics.UtteranceT0PlatformSeconds = StreamStartPlatformSeconds;
 	bAcePlaybackEndedObserved = false;
+	LastPositiveProceduralWallSeconds = -1.f;
 	bParallelAudiblePlaybackStarted = false;
 	ParallelAudibleQueuedBytes = 0;
 	ParallelAudibleQueueCallCount = 0;
@@ -1730,21 +2227,17 @@ bool UGodfreyPcmStreamSession::StartStream(UObject* WorldContextObject, AActor* 
 	const bool bUseParallelAudible = GetDefault<UUnrealPerformerGodfreySettings>()->bGodfreyUseParallelPcmAudiblePlayback;
 	if (bUseParallelAudible)
 	{
-		EnsureParallelAudibleWave(CharacterForAce);
-		if (ParallelAudibleWave)
-		{
-			bParallelAudibleActive = true;
-			UE_LOG(LogGodfreyPcmStream, Log,
-				TEXT("Godfrey utterance %d: parallel PCM audible path armed (%s; WavUrl PlaySound2D at ACE OnAnimationStarted)."),
-				UtteranceOrdinal,
-				GGodfreyParallelAudibleLogicStamp);
-		}
-		else
-		{
-			UE_LOG(LogGodfreyPcmStream, Warning,
-				TEXT("Godfrey utterance %d: parallel PCM wave allocation failed — falling back to ACE internal audible path."),
-				UtteranceOrdinal);
-		}
+		UE_LOG(LogGodfreyPcmStream, Error,
+			TEXT("Godfrey utterance %d: bGodfreyUseParallelPcmAudiblePlayback=1 is unsupported for exhibition (dual clock drifts lipsync from heard audio). Forcing ACE-only."),
+			UtteranceOrdinal);
+		// Hard reject dual-clock: do not arm parallel.
+		bParallelAudibleActive = false;
+	}
+	else
+	{
+		UE_LOG(LogGodfreyPcmStream, Log,
+			TEXT("Godfrey utterance %d: ACE-only single clock (heard audio + lipsync from ACE). Parallel path off."),
+			UtteranceOrdinal);
 	}
 
 	const float AceChunkMsCfg = GetDefault<UUnrealPerformerGodfreySettings>()->AceMaxPcmPushChunkDurationMs;
@@ -1863,6 +2356,163 @@ bool UGodfreyPcmStreamSession::ValidateFormat(const TArray<uint8>& PcmBytes, FSt
 	return true;
 }
 
+int64 UGodfreyPcmStreamSession::ApplySpeechGainToPcm16(TArray<uint8>& PcmBytes, const float Gain)
+{
+	const int32 SampleCount = PcmBytes.Num() / static_cast<int32>(sizeof(int16));
+	if (SampleCount <= 0)
+	{
+		return 0;
+	}
+
+	constexpr float Ceiling = 32767.f;
+	// Above the knee the gained signal is compressed into the remaining headroom instead of clipping flat.
+	constexpr float Knee = 0.85f * Ceiling;
+	constexpr float KneeRange = Ceiling - Knee;
+
+	int64 SaturatedSamples = 0;
+	int16* Samples = reinterpret_cast<int16*>(PcmBytes.GetData());
+	for (int32 Index = 0; Index < SampleCount; ++Index)
+	{
+		float Value = static_cast<float>(Samples[Index]) * Gain;
+		float Magnitude = FMath::Abs(Value);
+		if (Magnitude > Knee)
+		{
+			const float Over = Magnitude - Knee;
+			Magnitude = Knee + KneeRange * (Over / (Over + KneeRange));
+			Value = (Value < 0.f) ? -Magnitude : Magnitude;
+			++SaturatedSamples;
+		}
+		Samples[Index] = static_cast<int16>(FMath::Clamp(FMath::RoundToFloat(Value), -32768.f, Ceiling));
+	}
+
+	return SaturatedSamples;
+}
+
+int64 UGodfreyPcmStreamSession::ApplySpeechSilenceGateToPcm16(TArray<uint8>& PcmBytes, const int32 GateAbs)
+{
+	if (GateAbs <= 0)
+	{
+		return 0;
+	}
+
+	const int32 SampleCount = PcmBytes.Num() / static_cast<int32>(sizeof(int16));
+	if (SampleCount <= 0)
+	{
+		return 0;
+	}
+
+	int64 GatedSamples = 0;
+	int16* Samples = reinterpret_cast<int16*>(PcmBytes.GetData());
+	for (int32 Index = 0; Index < SampleCount; ++Index)
+	{
+		if (FMath::Abs(static_cast<int32>(Samples[Index])) < GateAbs)
+		{
+			Samples[Index] = 0;
+			++GatedSamples;
+		}
+	}
+	return GatedSamples;
+}
+
+int32 UGodfreyPcmStreamSession::FindLastNonSilentSampleIndex(const TArray<uint8>& PcmBytes, const int32 GateAbs)
+{
+	const int32 SampleCount = PcmBytes.Num() / static_cast<int32>(sizeof(int16));
+	if (SampleCount <= 0)
+	{
+		return -1;
+	}
+
+	const int32 Gate = FMath::Max(1, GateAbs);
+	const int16* Samples = reinterpret_cast<const int16*>(PcmBytes.GetData());
+	for (int32 Index = SampleCount - 1; Index >= 0; --Index)
+	{
+		if (FMath::Abs(static_cast<int32>(Samples[Index])) >= Gate)
+		{
+			return Index;
+		}
+	}
+	return -1;
+}
+
+int32 UGodfreyPcmStreamSession::FindLastVoicedWindowEndIndex(const TArray<uint8>& PcmBytes, const int32 SampleRate, const int32 MinRms)
+{
+	const int32 SampleCount = PcmBytes.Num() / static_cast<int32>(sizeof(int16));
+	if (SampleCount <= 0 || SampleRate <= 0)
+	{
+		return -1;
+	}
+
+	const int32 Window = FMath::Clamp(SampleRate / 50, 80, SampleRate / 20);
+	const int16* Samples = reinterpret_cast<const int16*>(PcmBytes.GetData());
+	const double Floor = static_cast<double>(FMath::Max(1, MinRms));
+	const int32 Hop = FMath::Max(1, Window / 2);
+
+	for (int32 End = SampleCount; End >= Window; End -= Hop)
+	{
+		const int32 Start = End - Window;
+		double SumSq = 0.0;
+		for (int32 Index = Start; Index < End; ++Index)
+		{
+			const double Sample = static_cast<double>(Samples[Index]);
+			SumSq += Sample * Sample;
+		}
+		if (FMath::Sqrt(SumSq / static_cast<double>(Window)) >= Floor)
+		{
+			return End - 1;
+		}
+	}
+
+	if (SampleCount < Window)
+	{
+		double SumSq = 0.0;
+		for (int32 Index = 0; Index < SampleCount; ++Index)
+		{
+			const double Sample = static_cast<double>(Samples[Index]);
+			SumSq += Sample * Sample;
+		}
+		if (FMath::Sqrt(SumSq / static_cast<double>(SampleCount)) >= Floor)
+		{
+			return SampleCount - 1;
+		}
+	}
+
+	return -1;
+}
+
+UAudio2FaceParameters* UGodfreyPcmStreamSession::GetOrCreateAceFaceParameters()
+{
+	if (AceFaceParameters)
+	{
+		return AceFaceParameters;
+	}
+
+	const UUnrealPerformerGodfreySettings* Settings = GetDefault<UUnrealPerformerGodfreySettings>();
+	const float Gain = Settings->GodfreySpeechPcmGain;
+	float InputStrength = Settings->GodfreyAceInputStrength;
+	if (InputStrength <= 0.f)
+	{
+		InputStrength = (Gain > 1.01f) ? (1.f / Gain) : 1.f;
+	}
+
+	AceFaceParameters = NewObject<UAudio2FaceParameters>(this);
+	AceFaceParameters->SetParameter(TEXT("inputStrength"), InputStrength);
+	AceFaceParameters->SetParameter(TEXT("lipOpenOffset"), Settings->GodfreyAceLipOpenOffset);
+
+	if (!bLoggedAceFaceParamsThisUtterance)
+	{
+		bLoggedAceFaceParamsThisUtterance = true;
+		UE_LOG(LogGodfreyPcmStream, Log,
+			TEXT("Godfrey utterance %d: A2F viseme params inputStrength=%.3f lipOpenOffset=%.3f (gain x%.2f, silenceGate=%d)."),
+			UtteranceOrdinal,
+			InputStrength,
+			Settings->GodfreyAceLipOpenOffset,
+			Gain,
+			Settings->GodfreySpeechSilenceGate);
+	}
+
+	return AceFaceParameters;
+}
+
 bool UGodfreyPcmStreamSession::PushPcm16Chunk(const TArray<uint8>& PcmBytes, FString& OutError)
 {
 	if (!ValidateFormat(PcmBytes, OutError))
@@ -1885,6 +2535,12 @@ bool UGodfreyPcmStreamSession::PushPcm16Chunk(const TArray<uint8>& PcmBytes, FSt
 		OutError = TEXT("PushPcm16Chunk: UACEAudioCurveSourceComponent missing.");
 		ReportError(OutError);
 		return false;
+	}
+
+	if (bAcePlaybackEndedObserved)
+	{
+		OutError.Reset();
+		return true;
 	}
 
 	if (!bLoggedFirstPcmChunk)
@@ -1910,16 +2566,45 @@ bool UGodfreyPcmStreamSession::PushPcm16Chunk(const TArray<uint8>& PcmBytes, FSt
 		}
 	}
 
+	const UUnrealPerformerGodfreySettings* SpeechSettings = GetDefault<UUnrealPerformerGodfreySettings>();
+	const float SpeechGain = SpeechSettings->GodfreySpeechPcmGain;
+	const int32 SilenceGate = SpeechSettings->GodfreySpeechSilenceGate;
+	TArray<uint8> PreparedPcmBytes;
+	const bool bApplyGain = !FMath::IsNearlyEqual(SpeechGain, 1.f, 0.01f);
+	const bool bApplyGate = SilenceGate > 0;
+	if (bApplyGain || bApplyGate)
+	{
+		PreparedPcmBytes = PcmBytes;
+		if (bApplyGain)
+		{
+			SpeechGainSaturatedSampleCount += ApplySpeechGainToPcm16(PreparedPcmBytes, SpeechGain);
+			if (!bLoggedSpeechGainThisUtterance)
+			{
+				bLoggedSpeechGainThisUtterance = true;
+				UE_LOG(LogGodfreyPcmStream, Log,
+					TEXT("Godfrey utterance %d: applying speech PCM gain x%.2f before ACE ingest (GodfreySpeechPcmGain)."),
+					UtteranceOrdinal,
+					SpeechGain);
+			}
+		}
+		if (bApplyGate)
+		{
+			SpeechSilenceGatedSampleCount += ApplySpeechSilenceGateToPcm16(PreparedPcmBytes, SilenceGate);
+		}
+	}
+	const TArray<uint8>& PcmForAce = (bApplyGain || bApplyGate) ? PreparedPcmBytes : PcmBytes;
+	const int64 SamplesBeforeChunk = TotalSamplesSentToAce;
+
 	const float ChunkMs = GetDefault<UUnrealPerformerGodfreySettings>()->AceMaxPcmPushChunkDurationMs;
 	const int32 MaxBytesPerAceCall = ComputeMaxPcmBytesPerAceSubChunk(StreamSampleRate, StreamNumChannels, ChunkMs);
 	const int32 FrameSize = StreamNumChannels * static_cast<int32>(sizeof(int16));
-	const int32 TotalBytes = PcmBytes.Num();
+	const int32 TotalBytes = PcmForAce.Num();
 
 	for (int32 OffsetBytes = 0; OffsetBytes < TotalBytes; OffsetBytes += MaxBytesPerAceCall)
 	{
 		const int32 SubBytes = FMath::Min(MaxBytesPerAceCall, TotalBytes - OffsetBytes);
 		check((SubBytes % FrameSize) == 0);
-		const int16* SubPtr = reinterpret_cast<const int16*>(PcmBytes.GetData() + OffsetBytes);
+		const int16* SubPtr = reinterpret_cast<const int16*>(PcmForAce.GetData() + OffsetBytes);
 		const int32 SubInt16Count = SubBytes / static_cast<int32>(sizeof(int16));
 		const int32 SubFrames = SubInt16Count / StreamNumChannels;
 		const double ChunkDurationSec = static_cast<double>(SubFrames) / static_cast<double>(StreamSampleRate);
@@ -1944,7 +2629,7 @@ bool UGodfreyPcmStreamSession::PushPcm16Chunk(const TArray<uint8>& PcmBytes, FSt
 			StreamSampleRate,
 			false,
 			TOptional<FAudio2FaceEmotion>(),
-			nullptr,
+			GetOrCreateAceFaceParameters(),
 			AceProviderName);
 
 		const double WallAfterAnimate = FPlatformTime::Seconds();
@@ -1984,18 +2669,44 @@ bool UGodfreyPcmStreamSession::PushPcm16Chunk(const TArray<uint8>& PcmBytes, FSt
 		TotalSamplesSentToAce += SubFrames;
 	}
 
-	RollingPcmBytes.Append(PcmBytes);
+	{
+		const int16* PeakSamples = reinterpret_cast<const int16*>(PcmForAce.GetData());
+		const int32 PeakCount = PcmForAce.Num() / static_cast<int32>(sizeof(int16));
+		for (int32 Index = 0; Index < PeakCount; ++Index)
+		{
+			SpeechPeakAbsSentToAce = FMath::Max(SpeechPeakAbsSentToAce, FMath::Abs(static_cast<int32>(PeakSamples[Index])));
+		}
+
+		const int32 LastGateInChunk = FindLastNonSilentSampleIndex(PcmForAce, FMath::Max(1, SilenceGate));
+		if (LastGateInChunk >= 0)
+		{
+			LastGate750SamplesSentToAce = SamplesBeforeChunk + LastGateInChunk + 1;
+		}
+
+		LastVoiceRmsFloorUsed = FMath::Max(4500, (SpeechPeakAbsSentToAce * 16) / 100);
+		const int32 LastVoiceInChunk = FindLastVoicedWindowEndIndex(
+			PcmForAce,
+			StreamSampleRate,
+			LastVoiceRmsFloorUsed);
+		if (LastVoiceInChunk >= 0)
+		{
+			LastNonSilentSamplesSentToAce = SamplesBeforeChunk + LastVoiceInChunk + 1;
+		}
+	}
+
+	LastSamplePushPlatformSeconds = FPlatformTime::Seconds();
+	RollingPcmBytes.Append(PcmForAce);
 
 	if (bParallelAudibleActive)
 	{
 		if (bParallelAudiblePlaybackStarted)
 		{
-			QueueParallelAudiblePcm(PcmBytes);
+			QueueParallelAudiblePcm(PcmForAce);
 		}
 	}
 
 	UE_LOG(LogGodfreyPcmStream, Verbose, TEXT("PCM sent to ACE. ChunkBytes=%d TotalSamplesToACE=%lld BufferedBytes=%d"),
-		PcmBytes.Num(),
+		PcmForAce.Num(),
 		TotalSamplesSentToAce,
 		RollingPcmBytes.Num());
 
@@ -2034,13 +2745,52 @@ bool UGodfreyPcmStreamSession::FinishStream(FString& OutError)
 					TotalSamplesSentToAce);
 			}
 
+			// Mute before EndAudioSamples whenever content is already past on the wall clock,
+			// or playback was already marked complete — EndAudio flush is a known hitch/syllable source.
+			const float WallNow = AceComp->GetProceduralPlaybackWallClockSeconds();
+			const float ExpectedSec = (StreamSampleRate > 0)
+				? static_cast<float>(TotalSamplesSentToAce) / static_cast<float>(StreamSampleRate)
+				: 0.f;
+			// Same rule as the watchdog: muting before the sent audio has actually played
+			// truncates the closing syllable, so this must not use negative slack either.
+			const bool bContentAlreadyPlayed = (ExpectedSec > 0.25f) && (WallNow >= (ExpectedSec + 0.03f));
+			if ((bAcePlaybackEndedObserved || bContentAlreadyPlayed) && AceComp->Volume > KINDA_SMALL_NUMBER)
+			{
+				UE_LOG(LogGodfreyPcmStream, Warning,
+					TEXT("Godfrey utterance %d: muting ACE before EndAudioSamples (AlreadyEnded=%d ContentPlayed=%d Wall=%.3f Expected=%.3f)."),
+					UtteranceOrdinal,
+					bAcePlaybackEndedObserved ? 1 : 0,
+					bContentAlreadyPlayed ? 1 : 0,
+					WallNow,
+					ExpectedSec);
+				AceComp->Volume = 0.f;
+			}
+
 			const double EndAudioSamplesPlatformSeconds = FPlatformTime::Seconds();
+			const float UnmatchedBeforeEnd = GetUnmatchedAudioSeconds();
 			UE_LOG(LogGodfreyPcmStream, Log,
-				TEXT("ACE EndAudioSamples invoked (stream tail / flush; not playback start). PlatformTime=%.6f SamplesSentToACE=%lld"),
+				TEXT("ACE EndAudioSamples invoked (stream tail / flush; not playback start). PlatformTime=%.6f SamplesSentToACE=%lld UnmatchedBeforeEnd=%.3fs AlreadyEnded=%d"),
 				EndAudioSamplesPlatformSeconds,
-				TotalSamplesSentToAce);
+				TotalSamplesSentToAce,
+				UnmatchedBeforeEnd,
+				bAcePlaybackEndedObserved ? 1 : 0);
 
 			const bool bEnded = FACERuntimeModule::Get().EndAudioSamples(AceComp);
+			const double EndAudioWallMs = (FPlatformTime::Seconds() - EndAudioSamplesPlatformSeconds) * 1000.0;
+			UE_LOG(LogGodfreyPcmStream, Log,
+				TEXT("Godfrey utterance %d: EndAudioSamples returned wall=%.1fms ok=%d UnmatchedBefore=%.3fs (watch for >100ms mid-speech hitches)"),
+				UtteranceOrdinal,
+				EndAudioWallMs,
+				bEnded ? 1 : 0,
+				UnmatchedBeforeEnd);
+			if (EndAudioWallMs >= 250.0)
+			{
+				UE_LOG(LogGodfreyPcmStream, Warning,
+					TEXT("Godfrey utterance %d: EndAudioSamples hitch %.1fms (UnmatchedBefore=%.3fs) — curve catch-up pacing may need tightening."),
+					UtteranceOrdinal,
+					EndAudioWallMs,
+					UnmatchedBeforeEnd);
+			}
 			if (!bEnded)
 			{
 				OutError = TEXT("ACE EndAudioSamples failed.");
@@ -2064,12 +2814,7 @@ bool UGodfreyPcmStreamSession::FinishStream(FString& OutError)
 	const float DelegateGraceSeconds = GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyAcePostFinishOnAnimationStartedDelegateGraceSeconds;
 	bFinished = true;
 
-	if (bParallelAudibleActive
-		&& GetDefault<UUnrealPerformerGodfreySettings>()->bGodfreyPlayAudibleAtFinishStream
-		&& !bParallelAudiblePlaybackStarted)
-	{
-		TryStartParallelAudiblePlayback(true, false);
-	}
+	// Dual-clock FinishStream audible start removed — ACE OnAnimationStarted is the only play gate.
 
 	if (CharacterWorld)
 	{
@@ -2107,6 +2852,7 @@ void UGodfreyPcmStreamSession::StopStream()
 {
 	const double StopWallSeconds = FPlatformTime::Seconds();
 	CancelDeferredAceUnbind();
+	CancelAudibleDiagnosticsTimer();
 	RestoreGodfreyAcePlaybackPrimingIfApplied();
 	StopParallelAudiblePlayback(true);
 	if (bStreamStarted && !bAcePlaybackEndedObserved)
@@ -2120,6 +2866,61 @@ void UGodfreyPcmStreamSession::StopStream()
 	bStreamStarted = false;
 	LogGodfreyAceStartupCompletionSummary(StopWallSeconds);
 	UE_LOG(LogGodfreyPcmStream, Log, TEXT("Stream stopped (ACE-only; delegates unbound)."));
+}
+
+void UGodfreyPcmStreamSession::AbortActiveStreamForCharacter(AActor* Character, const FString& Reason)
+{
+	if (!IsValid(Character))
+	{
+		return;
+	}
+
+	const TWeakObjectPtr<AActor> Key(Character);
+	UGodfreyPcmStreamSession* Session = nullptr;
+	if (const TWeakObjectPtr<UGodfreyPcmStreamSession>* Existing = GActiveGodfreyAceSessionByCharacter.Find(Key))
+	{
+		Session = Existing->Get();
+	}
+
+	UACEAudioCurveSourceComponent* AceComp = Character->FindComponentByClass<UACEAudioCurveSourceComponent>();
+	const bool bAcePlaying = AceComp && AceComp->IsProceduralAudioPlaying();
+	if (!Session && !bAcePlaying)
+	{
+		return;
+	}
+
+	UE_LOG(LogGodfreyPcmStream, Log,
+		TEXT("Aborting ACE stream on %s (%s) session=%s playing=%d — Stop then EndAudioSamples (close A2X)."),
+		*Character->GetName(),
+		*Reason,
+		Session ? *FString::Printf(TEXT("utt-%d"), Session->UtteranceOrdinal) : TEXT("none"),
+		bAcePlaying ? 1 : 0);
+
+	if (Session)
+	{
+		Session->StopStream();
+	}
+
+	if (!AceComp)
+	{
+		return;
+	}
+
+	const float SavedVolume = AceComp->Volume;
+	AceComp->Volume = 0.f;
+	AceComp->Stop();
+
+	const double EndAudioT0 = FPlatformTime::Seconds();
+	const bool bEnded = FACERuntimeModule::Get().EndAudioSamples(AceComp);
+	const double EndAudioMs = (FPlatformTime::Seconds() - EndAudioT0) * 1000.0;
+	UE_LOG(LogGodfreyPcmStream, Log,
+		TEXT("ACE teardown EndAudioSamples on %s (%s) wall=%.1fms ok=%d (hitch on stop is expected if unmatched was large)."),
+		*Character->GetName(),
+		*Reason,
+		EndAudioMs,
+		bEnded ? 1 : 0);
+
+	AceComp->Volume = (SavedVolume > KINDA_SMALL_NUMBER) ? SavedVolume : 1.f;
 }
 
 void UGodfreyPcmStreamSession::LogUtteranceLatencySummaryAtFinishIfEnabled(double FinishPlatformSeconds) const

@@ -38,6 +38,7 @@ Plugins/NvAudio2FaceMark/Intermediate/
 
 # Marketplace plugins (large; install locally) and Capture Manager imports
 Plugins/Marketplace/
+Plugins/Engine/
 Content/CaptureManager/
 
 # Don't ignore uproject or Config

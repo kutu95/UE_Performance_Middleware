@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "{DA42A55B-4F83-ED0F-AF0A-968DD8F758E7}",
+	"EngineAssociation": "5.8",
 	"Category": "",
 	"Description": "UE 5.8 compatibility clone of MetaHuman_Baseline_Test (original remains on UE 5.6).",
 	"Modules": [
@@ -56,6 +56,34 @@
 		},
 		{
 			"Name": "MetaHumanLiveLink",
+			"Enabled": true
+		},
+		{
+			"Name": "IKRig",
+			"Enabled": true
+		},
+		{
+			"Name": "WmfMedia",
+			"Enabled": true
+		},
+		{
+			"Name": "ElectraPlayer",
+			"Enabled": true
+		},
+		{
+			"Name": "MediaPlate",
+			"Enabled": true
+		},
+		{
+			"Name": "MediaFrameworkUtilities",
+			"Enabled": true
+		},
+		{
+			"Name": "Takes",
+			"Enabled": true
+		},
+		{
+			"Name": "MovieRenderPipeline",
 			"Enabled": true
 		}
 	]

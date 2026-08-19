@@ -3,6 +3,7 @@
 #include "Components/InputComponent.h"
 #include "AsyncActionStreamGodfreySpeech.h"
 #include "ACEAudioCurveSourceComponent.h"
+#include "GodfreyPcmStreamSession.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
@@ -34,6 +35,11 @@ void UGodfreyDirectSpeechComponent::BeginPlay()
 void UGodfreyDirectSpeechComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	UnbindDevKeyboard();
+	if (IsValid(ActiveStreamAction))
+	{
+		ActiveStreamAction->Cancel();
+	}
+	UGodfreyPcmStreamSession::AbortActiveStreamForCharacter(ResolveCharacterForAce(), TEXT("direct speech EndPlay"));
 	ActiveStreamAction = nullptr;
 	bIsStreaming = false;
 	Super::EndPlay(EndPlayReason);
@@ -54,9 +60,9 @@ AActor* UGodfreyDirectSpeechComponent::ResolveCharacterForAce() const
 		}
 	}
 
-	if (!CharacterActorTag.IsNone())
+	if (UWorld* World = GetWorld())
 	{
-		if (UWorld* World = GetWorld())
+		if (!CharacterActorTag.IsNone())
 		{
 			for (TActorIterator<AActor> It(World); It; ++It)
 			{
@@ -65,6 +71,21 @@ AActor* UGodfreyDirectSpeechComponent::ResolveCharacterForAce() const
 				{
 					return Actor;
 				}
+			}
+		}
+
+		// Same fallback as exhibition queue poll when the level tag is missing.
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* const Actor = *It;
+			if (!IsValid(Actor))
+			{
+				continue;
+			}
+			if (Actor->GetActorNameOrLabel() == TEXT("BP_Godfrey_Performer")
+				|| Actor->GetName().Contains(TEXT("BP_Godfrey_Performer")))
+			{
+				return Actor;
 			}
 		}
 	}
@@ -117,6 +138,21 @@ bool UGodfreyDirectSpeechComponent::AskGodfrey(const FString& PromptText)
 	{
 		UE_LOG(LogGodfreyDirectSpeech, Warning, TEXT("AskGodfrey: already streaming; ignoring new prompt."));
 		return false;
+	}
+
+	if (AActor* const AcePreview = ResolveCharacterForAce())
+	{
+		if (const UGodfreyPerformanceStateComponent* Perf =
+			AcePreview->FindComponentByClass<UGodfreyPerformanceStateComponent>())
+		{
+			const EGodfreyPerformanceState State = Perf->GetPerformanceState();
+			if (State == EGodfreyPerformanceState::Speaking || State == EGodfreyPerformanceState::Thinking)
+			{
+				UE_LOG(LogGodfreyDirectSpeech, Warning,
+					TEXT("AskGodfrey: performer busy (state=%d); ignoring new prompt."), static_cast<int32>(State));
+				return false;
+			}
+		}
 	}
 
 	if (!ResolveCharacterForAce())
@@ -204,7 +240,8 @@ void UGodfreyDirectSpeechComponent::HandleStreamFinished()
 
 	UE_LOG(LogGodfreyDirectSpeech, Log, TEXT("AskGodfrey: stream finished."));
 	OnStreamFinished.Broadcast();
-	NotifyPerformerListening();
+	// Do NOT BeginListening here — with hold-play, audible playback has not started yet.
+	// NotifyUtteranceEnded → EndSpeaking drives Listening when audio actually finishes.
 }
 
 void UGodfreyDirectSpeechComponent::HandleStreamError(const FString& ErrorMessage)

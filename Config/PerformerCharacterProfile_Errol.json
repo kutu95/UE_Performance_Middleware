@@ -1,0 +1,21 @@
+{
+  "profile_name": "Errol",
+  "note": "Migrates assembled MHC_Errol (Mesh-to-MetaHuman identity likeness) onto BP_Godfrey_Performer. Assemble MHC_Errol after binding MH_ID_Errol so SKM_MHC_Errol_* meshes exist on BP_MHC_Errol. MHC_CaptainGodfrey remains the archived Victorian stylization.",
+  "donor_blueprint": "/Game/MetaHumans/MHC_Errol/BP_MHC_Errol",
+  "performer_shell": "/Game/MetaHumans/Godfrey/BP_Godfrey_Performer",
+  "archive_bridge_shell": "/Game/MetaHumans/Godfrey/BP_Godfrey_Performer_CaptainGodfrey_Archive",
+  "mesh_labels": ["Body", "Face", "SkeletalMesh", "SkeletalMesh1", "SkeletalMesh2"],
+  "face_anim_bp": "/Game/MetaHumans/Common/Face/Face_AnimBP",
+  "clothing_post_process": "/Game/MetaHumans/Common/Animation/ABP_Clothing_PostProcess",
+  "body_mesh": "/Game/MetaHumans/MHC_Errol/Body/SKM_MHC_Errol_BodyMesh",
+  "face_mesh": "/Game/MetaHumans/MHC_Errol/Face/SKM_MHC_Errol_FaceMesh",
+  "outfit": "/Game/MetaHumans/MHC_Errol/Clothing/MHC_Errol_Outfits",
+  "character_definition": "/Game/MetaHumans/MHC_Errol",
+  "identity": "/Game/MetaHumans/Errol/Identity/MH_ID_Errol",
+  "identity_archive": "/Game/MetaHumans/Errol/Identity_Archive_2026-07-26",
+  "livelink_takes": "/Game/CaptureManager/Imports/Live_Link_Face",
+  "reference_photos": "/Game/MetaHumans/Errol/Source/Photos",
+  "exhibition_wiring": "ACE + AceWarmup + PerformanceState + AnimationBridge (garments OFF; body montages as wired)",
+  "migration_script": "Scripts/migrate_errol_to_godfrey_performer.py",
+  "level_swap_script": "Scripts/swap_godfrey_world_to_mhc_performer.py"
+}

@@ -16,6 +16,10 @@
 
 #include "Async/Async.h"
 
+#include "Engine/Engine.h"
+
+#include "Engine/World.h"
+
 #include "Dom/JsonObject.h"
 
 #include "Dom/JsonValue.h"
@@ -567,6 +571,54 @@ void UAsyncActionStreamGodfreySpeech::HandleExhibitionTtsStatusCompleted(
 
 	{
 
+		FString Phase;
+
+		JsonObj->TryGetStringField(TEXT("phase"), Phase);
+
+		FString PendingRequestId;
+
+		JsonObj->TryGetStringField(TEXT("requestId"), PendingRequestId);
+
+		AActor* const Ch = CharacterForAce.Get();
+
+		if (IsValid(Ch))
+
+		{
+
+			if (UGodfreyPerformanceStateComponent* const Perf = Ch->FindComponentByClass<UGodfreyPerformanceStateComponent>())
+
+			{
+
+				if (Phase.Equals(TEXT("awaiting_reply"), ESearchCase::IgnoreCase) && !PendingRequestId.IsEmpty())
+
+				{
+
+					UE_LOG(LogGodfreySpeechStreamNode, Log,
+
+						TEXT("PullQueuedGodfreySpeechToAudio: Brain awaiting_reply requestId=%s — NotifyReplyIncoming"),
+
+						*PendingRequestId);
+
+					Perf->NotifyReplyIncoming(PendingRequestId);
+
+				}
+
+				else if (Perf->IsAwaitingBrainReply())
+
+				{
+
+					UE_LOG(LogGodfreySpeechStreamNode, Log,
+
+						TEXT("PullQueuedGodfreySpeechToAudio: pending cleared (no phase) — ClearReplyIncoming"));
+
+					Perf->ClearReplyIncoming();
+
+				}
+
+			}
+
+		}
+
 		UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("No queued Godfrey speech."));
 
 		bDidFinish = true;
@@ -580,6 +632,40 @@ void UAsyncActionStreamGodfreySpeech::HandleExhibitionTtsStatusCompleted(
 	}
 
 
+
+	// Reply is ready — silent clear awaiting-brain (avoid IdleBreathing flash before cues / speak).
+
+	if (AActor* const ChReady = CharacterForAce.Get())
+
+	{
+
+		if (UGodfreyPerformanceStateComponent* const PerfReady =
+
+				ChReady->FindComponentByClass<UGodfreyPerformanceStateComponent>())
+
+		{
+
+			if (PerfReady->IsAwaitingBrainReply())
+
+			{
+
+				UE_LOG(LogGodfreySpeechStreamNode, Log,
+
+					TEXT("PullQueuedGodfreySpeechToAudio: queue ready — clearing awaiting_reply requestId=%s"),
+
+					*PerfReady->GetAwaitingBrainRequestId());
+
+				PerfReady->ClearReplyIncoming(/*bRefreshVisitorAwaitListening=*/false);
+
+			}
+
+		}
+
+	}
+
+
+
+	TryLatchConversationEndFromStatusJson(JsonObj);
 
 	LogGodfreyPerformanceEventsFromStatusJson(JsonObj);
 
@@ -772,47 +858,54 @@ void UAsyncActionStreamGodfreySpeech::StartSpeakStreamPcmPost()
 
 
 
-	ActiveRequest->OnRequestProgress64().BindLambda([this](FHttpRequestPtr /*Request*/, uint64 /*BytesSent*/, uint64 BytesReceived)
-
+	const TWeakObjectPtr<UAsyncActionStreamGodfreySpeech> WeakProgress(this);
+	ActiveRequest->OnRequestProgress64().BindLambda([WeakProgress](FHttpRequestPtr /*Request*/, uint64 /*BytesSent*/, uint64 BytesReceived)
 	{
-
-		if (!this || bDidFinish)
-
+		UAsyncActionStreamGodfreySpeech* Strong = WeakProgress.Get();
+		if (!IsValid(Strong) || Strong->bDidFinish)
 		{
-
 			return;
-
 		}
-
-		HandleRequestProgress64(BytesReceived);
-
+		Strong->HandleRequestProgress64(BytesReceived);
 	});
 
-
-
-	ActiveRequest->OnProcessRequestComplete().BindLambda([this](FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bConnectedSuccessfully)
-
+	const TWeakObjectPtr<UAsyncActionStreamGodfreySpeech> WeakComplete(this);
+	ActiveRequest->OnProcessRequestComplete().BindLambda([WeakComplete](FHttpRequestPtr /*Request*/, FHttpResponsePtr Response, bool bConnectedSuccessfully)
 	{
-
-		if (!this || bDidFinish)
-
+		UAsyncActionStreamGodfreySpeech* Strong = WeakComplete.Get();
+		if (!IsValid(Strong) || Strong->bDidFinish)
 		{
-
 			return;
-
 		}
-
 		const int32 ResponseCode = Response.IsValid() ? Response->GetResponseCode() : 0;
-
 		const FString CompletionError = (!bConnectedSuccessfully || !Response.IsValid())
-
 			? TEXT("HTTP stream request failed or response invalid.")
-
 			: FString();
-
-		HandleRequestCompleted(bConnectedSuccessfully, ResponseCode, CompletionError);
-
+		Strong->HandleRequestCompleted(bConnectedSuccessfully, ResponseCode, CompletionError, Response);
 	});
+
+	const TWeakObjectPtr<UAsyncActionStreamGodfreySpeech> WeakHeader(this);
+	ActiveRequest->OnHeaderReceived().BindLambda(
+		[WeakHeader](FHttpRequestPtr /*Request*/, const FString& HeaderName, const FString& NewHeaderValue)
+		{
+			if (!HeaderName.Equals(TEXT("X-Godfrey-Conversation-End"), ESearchCase::IgnoreCase))
+			{
+				return;
+			}
+			if (!NewHeaderValue.Equals(TEXT("true"), ESearchCase::IgnoreCase))
+			{
+				return;
+			}
+			AsyncTask(ENamedThreads::GameThread, [WeakHeader]()
+			{
+				UAsyncActionStreamGodfreySpeech* Strong = WeakHeader.Get();
+				if (!IsValid(Strong) || Strong->bDidFinish)
+				{
+					return;
+				}
+				Strong->LatchConversationEndFromBrain(TEXT("visitor_phrase"));
+			});
+		});
 
 
 
@@ -966,7 +1059,71 @@ void UAsyncActionStreamGodfreySpeech::HandleRequestProgress64(uint64 BytesReceiv
 
 
 
+float UAsyncActionStreamGodfreySpeech::GetHttpBodyDrainPaceDelaySeconds() const
+
+{
+
+	if (!StreamSession)
+
+	{
+
+		return 0.f;
+
+	}
+
+	const UUnrealPerformerGodfreySettings* Settings = GetDefault<UUnrealPerformerGodfreySettings>();
+
+	if (!Settings->bGodfreyAcePaceIngestByCurveCatchUp && !StreamSession->ShouldDeferEndAudioSamplesForCurveCatchUp())
+
+	{
+
+		return 0.f;
+
+	}
+
+	if (StreamSession->ShouldDeferEndAudioSamplesForCurveCatchUp())
+
+	{
+
+		return 0.05f;
+
+	}
+
+	if (!Settings->bGodfreyAcePaceIngestByCurveCatchUp)
+
+	{
+
+		return 0.f;
+
+	}
+
+	const float Unmatched = StreamSession->GetUnmatchedAudioSeconds();
+
+	if (Unmatched >= Settings->GodfreyAceSoftThrottleMediumUnmatchedSeconds)
+
+	{
+
+		return 0.05f;
+
+	}
+
+	return 0.f;
+
+}
+
+
+
 void UAsyncActionStreamGodfreySpeech::ScheduleHttpBodyDrain()
+
+{
+
+	ScheduleHttpBodyDrainDelayed(0.f);
+
+}
+
+
+
+void UAsyncActionStreamGodfreySpeech::ScheduleHttpBodyDrainDelayed(float DelaySeconds)
 
 {
 
@@ -984,7 +1141,7 @@ void UAsyncActionStreamGodfreySpeech::ScheduleHttpBodyDrain()
 
 	const TWeakObjectPtr<UAsyncActionStreamGodfreySpeech> WeakThis(this);
 
-	AsyncTask(ENamedThreads::GameThread, [WeakThis]()
+	auto RunDrain = [WeakThis]()
 
 	{
 
@@ -992,11 +1149,69 @@ void UAsyncActionStreamGodfreySpeech::ScheduleHttpBodyDrain()
 
 		{
 
+			Strong->bHttpBodyDrainCatchUpDeferred = false;
+
 			Strong->ProcessHttpBodyFifo_GameThread();
 
 		}
 
-	});
+	};
+
+
+
+	if (DelaySeconds <= KINDA_SMALL_NUMBER)
+
+	{
+
+		AsyncTask(ENamedThreads::GameThread, RunDrain);
+
+		return;
+
+	}
+
+
+
+	UWorld* World = nullptr;
+
+	if (AActor* Character = CharacterForAce.Get())
+
+	{
+
+		World = Character->GetWorld();
+
+	}
+
+	if (!World && WorldContextObject)
+
+	{
+
+		World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr;
+
+	}
+
+	if (!World)
+
+	{
+
+		AsyncTask(ENamedThreads::GameThread, RunDrain);
+
+		return;
+
+	}
+
+
+
+	bHttpBodyDrainCatchUpDeferred = true;
+
+	World->GetTimerManager().SetTimer(
+
+		HttpBodyDrainTimerHandle,
+
+		FTimerDelegate::CreateLambda(RunDrain),
+
+		DelaySeconds,
+
+		false);
 
 }
 
@@ -1178,7 +1393,23 @@ void UAsyncActionStreamGodfreySpeech::ProcessHttpBodyFifo_GameThread()
 
 	{
 
-		ScheduleHttpBodyDrain();
+		const float PaceDelay = GetHttpBodyDrainPaceDelaySeconds();
+
+		if (PaceDelay > 0.f)
+
+		{
+
+			ScheduleHttpBodyDrainDelayed(PaceDelay);
+
+		}
+
+		else
+
+		{
+
+			ScheduleHttpBodyDrain();
+
+		}
 
 	}
 
@@ -1226,7 +1457,92 @@ void UAsyncActionStreamGodfreySpeech::TryFinishStreamAfterHttpComplete()
 
 
 
+	if (StreamSession && StreamSession->ShouldDeferEndAudioSamplesForCurveCatchUp())
+
+	{
+
+		const double Now = FPlatformTime::Seconds();
+
+		if (AceEndCatchUpWaitStartPlatformSeconds < 0.0)
+
+		{
+
+			AceEndCatchUpWaitStartPlatformSeconds = Now;
+
+			LastAceCatchUpWaitLogPlatformSeconds = -1.0;
+
+			UE_LOG(LogGodfreySpeechStreamNode, Log,
+
+				TEXT("HTTP+PCM drained: deferring EndAudioSamples until ACE curves catch up (Unmatched=%.3fs threshold=%.3fs Sent=%.1fs Wall=%.1fs)."),
+
+				StreamSession->GetUnmatchedAudioSeconds(),
+
+				GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyAceEndAudioMaxUnmatchedSeconds,
+
+				StreamSession->GetSentAudioSeconds(),
+
+				StreamSession->GetPlaybackWallSeconds());
+
+		}
+
+		const double Elapsed = Now - AceEndCatchUpWaitStartPlatformSeconds;
+
+		// Do NOT force after the short config timeout while unmatched is still huge mid-speech —
+
+		// that caused ~7s game-thread hitches on long occasion speeches. Wait for natural catch-up
+
+		// or until playback is near the end (hitch then lands in the tail / silence).
+
+		if (!StreamSession->ShouldForceEndAudioSamplesDespiteCatchUpLag(static_cast<float>(Elapsed)))
+
+		{
+
+			if (LastAceCatchUpWaitLogPlatformSeconds < 0.0 || (Now - LastAceCatchUpWaitLogPlatformSeconds) >= 5.0)
+
+			{
+
+				LastAceCatchUpWaitLogPlatformSeconds = Now;
+
+				UE_LOG(LogGodfreySpeechStreamNode, Log,
+
+					TEXT("Still deferring EndAudioSamples (elapsed=%.1fs Unmatched=%.3fs Sent=%.1fs Wall=%.1fs) — avoiding mid-speech hitch."),
+
+					Elapsed,
+
+					StreamSession->GetUnmatchedAudioSeconds(),
+
+					StreamSession->GetSentAudioSeconds(),
+
+					StreamSession->GetPlaybackWallSeconds());
+
+			}
+
+			// Leave bHttpCompleteAwaitingFinish set; paced timer will retry.
+
+			return;
+
+		}
+
+		UE_LOG(LogGodfreySpeechStreamNode, Warning,
+
+			TEXT("Forcing EndAudioSamples after %.1fs defer (Unmatched=%.3fs Sent=%.1fs Wall=%.1fs) — near end or safety deadline."),
+
+			Elapsed,
+
+			StreamSession->GetUnmatchedAudioSeconds(),
+
+			StreamSession->GetSentAudioSeconds(),
+
+			StreamSession->GetPlaybackWallSeconds());
+
+	}
+
+
+
 	bHttpCompleteAwaitingFinish = false;
+
+	AceEndCatchUpWaitStartPlatformSeconds = -1.0;
+	LastAceCatchUpWaitLogPlatformSeconds = -1.0;
 
 
 
@@ -1234,7 +1550,7 @@ void UAsyncActionStreamGodfreySpeech::TryFinishStreamAfterHttpComplete()
 
 	UE_LOG(LogGodfreySpeechStreamNode, Log,
 
-		TEXT("HTTP complete: calling FinishStream (EndAudioSamples). PlatformTime=%.6f TotalHttpBodyBytes=%lld HttpSerializeCallbacks=%d AnimateFromAudioPushes=%d"),
+		TEXT("HTTP complete: calling FinishStream (EndAudioSamples). PlatformTime=%.6f TotalHttpBodyBytes=%lld HttpSerializeCallbacks=%d AnimateFromAudioPushes=%d Unmatched=%.3fs"),
 
 		EndPlatformSeconds,
 
@@ -1242,7 +1558,9 @@ void UAsyncActionStreamGodfreySpeech::TryFinishStreamAfterHttpComplete()
 
 		HttpStreamChunkCount,
 
-		AnimateFromAudioPushCount);
+		AnimateFromAudioPushCount,
+
+		StreamSession ? StreamSession->GetUnmatchedAudioSeconds() : -1.f);
 
 
 
@@ -1309,6 +1627,16 @@ void UAsyncActionStreamGodfreySpeech::CompletePullQueuedActionAfterPlayback()
 
 
 	OnFinished.Broadcast();
+
+	if (StreamSession && !StreamSession->HasAcePlaybackEnded())
+	{
+		bAwaitingPlaybackBeforeDestroy = true;
+
+		UE_LOG(LogGodfreySpeechStreamNode, Log,
+			TEXT("Holding action alive until ACE playback ends (keeps the end-of-playback watchdog off the GC path)."));
+
+		return;
+	}
 
 	SetReadyToDestroy();
 
@@ -1442,7 +1770,8 @@ void UAsyncActionStreamGodfreySpeech::ProcessPendingPcmBytes(bool bFlushFinal, i
 
 
 
-void UAsyncActionStreamGodfreySpeech::HandleRequestCompleted(bool bConnectedSuccessfully, int32 ResponseCode, const FString& CompletionError)
+void UAsyncActionStreamGodfreySpeech::HandleRequestCompleted(bool bConnectedSuccessfully, int32 ResponseCode, const FString& CompletionError,
+	FHttpResponsePtr Response)
 
 {
 
@@ -1482,6 +1811,8 @@ void UAsyncActionStreamGodfreySpeech::HandleRequestCompleted(bool bConnectedSucc
 
 	}
 
+	TryLatchConversationEndFromStreamHeaders(Response);
+
 
 
 	{
@@ -1520,68 +1851,111 @@ void UAsyncActionStreamGodfreySpeech::HandleRequestCompleted(bool bConnectedSucc
 
 
 
-void UAsyncActionStreamGodfreySpeech::FailAndStop(const FString& ErrorMessage)
-
+void UAsyncActionStreamGodfreySpeech::Cancel()
 {
+	const bool bNeedsDestroy = !bDidFinish || bAwaitingPlaybackBeforeDestroy || bAwaitingPlaybackBeforeFinish;
 
-	if (bDidFinish)
+	UE_LOG(LogGodfreySpeechStreamNode, Log,
+		TEXT("Godfrey speech async: Cancel (PIE/EndPlay teardown) finished=%d awaitingPlayback=%d."),
+		bDidFinish ? 1 : 0,
+		(bAwaitingPlaybackBeforeDestroy || bAwaitingPlaybackBeforeFinish) ? 1 : 0);
+
+	bDidFinish = true;
+	bHttpCompleteAwaitingFinish = false;
+	bAwaitingPlaybackBeforeFinish = false;
+	bAwaitingPlaybackBeforeDestroy = false;
+
+	if (ActiveRequest.IsValid())
+	{
+		ActiveRequest->OnRequestProgress64().Unbind();
+		ActiveRequest->OnProcessRequestComplete().Unbind();
+		ActiveRequest->CancelRequest();
+		ActiveRequest.Reset();
+	}
 
 	{
+		FScopeLock Lock(&HttpBodyLock);
+		HttpBodyAccum.Reset();
+	}
+	bHttpBodyDrainPending = false;
+	UWorld* World = CharacterForAce ? CharacterForAce->GetWorld() : nullptr;
+	if (!World && WorldContextObject)
+	{
+		World = WorldContextObject->GetWorld();
+	}
+	if (World)
+	{
+		World->GetTimerManager().ClearTimer(HttpBodyDrainTimerHandle);
+	}
+	bHttpBodyDrainCatchUpDeferred = false;
+	AceEndCatchUpWaitStartPlatformSeconds = -1.0;
+	LastAceCatchUpWaitLogPlatformSeconds = -1.0;
 
+	if (StreamSession)
+	{
+		StreamSession->OnPlaybackStarted.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackStarted);
+		StreamSession->OnLipSyncStarted.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionLipSyncStarted);
+		StreamSession->OnPlaybackEnded.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackEnded);
+		StreamSession->OnError.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionError);
+		StreamSession->StopStream();
+		StreamSession = nullptr;
+	}
+
+	UGodfreyPcmStreamSession::AbortActiveStreamForCharacter(CharacterForAce.Get(), TEXT("async Cancel"));
+
+	if (bNeedsDestroy)
+	{
+		SetReadyToDestroy();
+	}
+}
+
+void UAsyncActionStreamGodfreySpeech::FailAndStop(const FString& ErrorMessage)
+{
+	if (!IsValid(this) || HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed) || bDidFinish)
+	{
 		return;
-
 	}
 
 	bDidFinish = true;
 
-
-
 	UE_LOG(LogGodfreySpeechStreamNode, Error, TEXT("%s"), *ErrorMessage);
 
-
-
 	if (ActiveRequest.IsValid())
-
 	{
-
+		ActiveRequest->OnRequestProgress64().Unbind();
+		ActiveRequest->OnProcessRequestComplete().Unbind();
 		ActiveRequest->CancelRequest();
-
 		ActiveRequest.Reset();
-
 	}
-
-
 
 	{
-
 		FScopeLock Lock(&HttpBodyLock);
-
 		HttpBodyAccum.Reset();
-
 	}
-
 	bHttpBodyDrainPending = false;
 
-
-
-	if (StreamSession)
-
+	UWorld* World = IsValid(CharacterForAce) ? CharacterForAce->GetWorld() : nullptr;
+	if (!World && IsValid(WorldContextObject))
 	{
-
-		StreamSession->StopStream();
-
+		World = WorldContextObject->GetWorld();
 	}
+	if (World)
+	{
+		World->GetTimerManager().ClearTimer(HttpBodyDrainTimerHandle);
+	}
+	bHttpBodyDrainCatchUpDeferred = false;
+	AceEndCatchUpWaitStartPlatformSeconds = -1.0;
+	LastAceCatchUpWaitLogPlatformSeconds = -1.0;
 
-
+	if (IsValid(StreamSession))
+	{
+		StreamSession->StopStream();
+	}
 
 	TryForwardUtteranceEndedToPerformerIfNeeded();
 
-
-
 	OnError.Broadcast(ErrorMessage);
-
 	SetReadyToDestroy();
-
 }
 
 
@@ -1635,6 +2009,11 @@ void UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackEnded()
 	if (bPullQueuedMode && bAwaitingPlaybackBeforeFinish)
 	{
 		CompletePullQueuedActionAfterPlayback();
+	}
+	else if (bAwaitingPlaybackBeforeDestroy)
+	{
+		bAwaitingPlaybackBeforeDestroy = false;
+		SetReadyToDestroy();
 	}
 
 }
@@ -1724,6 +2103,72 @@ void UAsyncActionStreamGodfreySpeech::TryForwardUtteranceEndedToPerformerIfNeede
 }
 
 
+
+void UAsyncActionStreamGodfreySpeech::TryLatchConversationEndFromStatusJson(const TSharedPtr<FJsonObject>& JsonObj)
+{
+	if (!JsonObj.IsValid())
+	{
+		return;
+	}
+
+	bool bConversationEnd = false;
+	if (!JsonObj->TryGetBoolField(TEXT("conversationEnd"), bConversationEnd) || !bConversationEnd)
+	{
+		return;
+	}
+
+	FString Source;
+	JsonObj->TryGetStringField(TEXT("conversationEndSource"), Source);
+	if (Source.IsEmpty())
+	{
+		Source = TEXT("unspecified");
+	}
+
+	UE_LOG(LogGodfreySpeechStreamNode, Log,
+		TEXT("Godfrey conversationEnd flagged by Brain (source=%s) — farewell deferred until this reply finishes."),
+		*Source);
+
+	LatchConversationEndFromBrain(Source);
+}
+
+void UAsyncActionStreamGodfreySpeech::TryLatchConversationEndFromStreamHeaders(const FHttpResponsePtr& Response)
+{
+	if (!Response.IsValid())
+	{
+		return;
+	}
+
+	const FString Flag = Response->GetHeader(TEXT("X-Godfrey-Conversation-End"));
+	if (!Flag.Equals(TEXT("true"), ESearchCase::IgnoreCase))
+	{
+		return;
+	}
+
+	FString Source = Response->GetHeader(TEXT("X-Godfrey-Conversation-End-Source"));
+	if (Source.IsEmpty())
+	{
+		Source = TEXT("stream_header");
+	}
+
+	UE_LOG(LogGodfreySpeechStreamNode, Log,
+		TEXT("Godfrey conversationEnd flagged by Brain stream header (source=%s) — farewell deferred until this reply finishes."),
+		*Source);
+
+	LatchConversationEndFromBrain(Source);
+}
+
+void UAsyncActionStreamGodfreySpeech::LatchConversationEndFromBrain(const FString& Source)
+{
+	AActor* const Ch = CharacterForAce.Get();
+	if (!IsValid(Ch))
+	{
+		return;
+	}
+	if (UGodfreyPerformanceStateComponent* const Perf = Ch->FindComponentByClass<UGodfreyPerformanceStateComponent>())
+	{
+		Perf->RequestConversationEnd(FString::Printf(TEXT("brain conversationEnd (%s)"), *Source));
+	}
+}
 
 void UAsyncActionStreamGodfreySpeech::TryForwardPerformanceCueToPerformer(const FString& CueType, const FString& CueValue, const FString& RawCue)
 

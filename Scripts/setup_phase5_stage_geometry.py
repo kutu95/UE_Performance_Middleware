@@ -192,6 +192,12 @@ def ensure_cine_camera(center: unreal.Vector) -> None:
         cine.set_editor_property("current_focal_length", 35.0)
         cine.set_editor_property("current_aperture", 2.8)
 
+    tags = list(actor.tags) if hasattr(actor, "tags") else []
+    if "GodfreyExhibitCamera" not in tags:
+        tags.append("GodfreyExhibitCamera")
+        actor.tags = tags
+        log(f"Tagged {label} with GodfreyExhibitCamera")
+
 
 def reject_contaminated_performers() -> None:
     bad_labels = ("BP_Gavin", "Gavin", "Erno", "Godfrey_Performer", "GodfreyApi")

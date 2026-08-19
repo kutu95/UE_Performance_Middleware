@@ -9,6 +9,7 @@
 
 class AActor;
 class UACEAudioCurveSourceComponent;
+class UAudio2FaceParameters;
 class UAudioComponent;
 class USoundWaveProcedural;
 
@@ -16,9 +17,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FGodfreyStreamSimpleEvent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FGodfreyStreamErrorEvent, const FString&, ErrorMessage);
 
 /**
- * Streams PCM16 into NVIDIA ACE (AnimateFromAudioSamples). Lip-sync curves come from ACE;
- * audible output uses either ACE internal playback or an optional parallel 2D procedural player
- * (see bGodfreyUseParallelPcmAudiblePlayback).
+ * Streams PCM16 into NVIDIA ACE (AnimateFromAudioSamples).
+ * Single clock: ACE internal playback is both the heard audio and the lipsync timing source.
+ * Parallel WavUrl playback is disabled by default (see bGodfreyUseParallelPcmAudiblePlayback).
  */
 UCLASS(BlueprintType)
 class UNREAL_PERFORMER_API UGodfreyPcmStreamSession : public UObject
@@ -39,6 +40,14 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Audio|Godfrey|Streaming")
 	void StopStream();
+
+	/**
+	 * Abort ingest, mute/stop ACE playback, then EndAudioSamples to close the A2X session.
+	 * Call from EndPlay: a leftover LocalA2F session blocks the next PIE Allocate/PrepareNewAudioComponent.
+	 * Flush may hitch the stop (unmatched backlog) — that is cheaper than a ~90s freeze on restart.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Audio|Godfrey|Streaming")
+	static void AbortActiveStreamForCharacter(AActor* Character, const FString& Reason = TEXT("teardown"));
 
 	/**
 	 * Runs ~0.5s of silence through the same ACE path as streaming (AnimateFromAudioSamples + EndAudioSamples) to pay
@@ -66,8 +75,40 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
 	int32 GetBufferedPcmBytes() const { return RollingPcmBytes.Num(); }
 
-	/** Caps push budget during playback when sent audio outruns curves (optional soft throttle; off by default). */
+	/** Caps push budget during playback when sent audio outruns curves (optional soft throttle). */
 	int32 GetEffectiveIngestPushBudget(int32 ConfigBudget, bool bAllowOverrun = false) const;
+
+	/** Sent audio seconds minus max received curve timestamp (0 if unknown / not playing). */
+	float GetUnmatchedAudioSeconds() const;
+
+	/** Seconds of PCM already pushed to ACE (0 if stream not started). */
+	float GetSentAudioSeconds() const;
+
+	/** ACE procedural playback wall clock (-1 if unavailable). */
+	float GetPlaybackWallSeconds() const;
+
+	/**
+	 * True while ACE is playing and curves lag sent audio enough that EndAudioSamples would hitch.
+	 * Caller should keep polling until false (or timeout) before FinishStream.
+	 */
+	bool ShouldDeferEndAudioSamplesForCurveCatchUp() const;
+
+	/**
+	 * After HTTP drain, only force EndAudioSamples when catch-up has stalled near the audible end
+	 * (or an absolute safety deadline). Never force mid-speech with tens of seconds unmatched —
+	 * that blocks the game thread for seconds (animation/lipsync freeze on long occasion speeches).
+	 */
+	bool ShouldForceEndAudioSamplesDespiteCatchUpLag(float CatchUpElapsedSeconds) const;
+
+	/** True once OnPlaybackEnded has broadcast for this utterance (OnAnimationEnded, watchdog, or stop). */
+	bool HasAcePlaybackEnded() const { return bAcePlaybackEndedObserved; }
+
+	/**
+	 * True while this character has an active ACE stream session whose audible playback has not ended yet.
+	 * Covers the gap after HTTP FinishStream (IsStreaming=false) while ACE still plays — use for mic mute.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
+	static bool IsCharacterAudiblePlaybackActive(const AActor* Character);
 
 	/** Fires when ACE internal playback/sync pipeline starts (UACEAudioCurveSourceComponent::OnAnimationStarted). */
 	UPROPERTY(BlueprintAssignable, Category = "Audio|Godfrey|Streaming")
@@ -88,6 +129,13 @@ public:
 
 private:
 	bool ValidateFormat(const TArray<uint8>& PcmBytes, FString& OutError) const;
+	/** In-place linear gain with soft saturation near full scale; returns samples that entered the limiter knee. */
+	static int64 ApplySpeechGainToPcm16(TArray<uint8>& PcmBytes, float Gain);
+	static int64 ApplySpeechSilenceGateToPcm16(TArray<uint8>& PcmBytes, int32 GateAbs);
+	static int32 FindLastNonSilentSampleIndex(const TArray<uint8>& PcmBytes, int32 GateAbs);
+	/** Last sample at the end of a 20ms window whose RMS is still speech, not breath/decay. */
+	static int32 FindLastVoicedWindowEndIndex(const TArray<uint8>& PcmBytes, int32 SampleRate, int32 MinRms);
+	UAudio2FaceParameters* GetOrCreateAceFaceParameters();
 	void ReportError(const FString& ErrorMessage);
 	void UnbindAceDelegates();
 	void RegisterAsActiveAceSessionForCharacter();
@@ -95,6 +143,8 @@ private:
 	bool IsActiveAceSessionForCharacter() const;
 	void CancelDeferredAceUnbind();
 	void ScheduleDeferredAceUnbindAfterFinishStream(UWorld* World, double FinishStreamPlatformSeconds);
+	/** Poll ACE wall/MaxCurveTs for playback end; safe to call from OnAnimationStarted (before FinishStream). */
+	void EnsureAudioEndWatchdogScheduled(UWorld* World);
 	void ProcessDeferredAceUnbindTick();
 	void LogUtteranceLatencySummaryAtFinishIfEnabled(double FinishPlatformSeconds) const;
 	void ApplyGodfreyAcePlaybackPriming(UACEAudioCurveSourceComponent* AceComp);
@@ -124,6 +174,15 @@ private:
 	UFUNCTION()
 	void HandleAceAnimationEnded();
 
+	/** Shared end path for native OnAnimationEnded or wall-clock/MaxCurveTs watchdog. */
+	void CompleteAcePlaybackEnded(const TCHAR* Reason);
+
+	/**
+	 * End utterance when ACE audio timeline is done even if OnAnimationEnded never fires.
+	 * Armed from OnAnimationStarted (not only FinishStream) so Speaking ends when audible audio ends.
+	 */
+	bool TryCompleteAcePlaybackFromAudioEndWatchdog();
+
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> TargetCharacter;
 
@@ -134,9 +193,28 @@ private:
 	int32 StreamSampleRate = 0;
 	int32 StreamNumChannels = 0;
 	int64 TotalSamplesSentToAce = 0;
+	double LastSamplePushPlatformSeconds = -1.0;
+	float LastObservedMaxCurveTs = -1.f;
+	double MaxCurveTsLastChangePlatformSeconds = -1.0;
+	/** Highest procedural playback wall clock seen; ACE reports -1 once playback stops. */
+	float LastPositiveProceduralWallSeconds = -1.f;
+	int64 SpeechGainSaturatedSampleCount = 0;
+	int64 SpeechSilenceGatedSampleCount = 0;
+	/** Samples through the last voiced 20ms window (RMS floor). Trailing breath above the sample gate is not voice. */
+	int64 LastNonSilentSamplesSentToAce = 0;
+	/** Last sample >= silence gate; diagnostic only (late vs perceived end of speech). */
+	int64 LastGate750SamplesSentToAce = 0;
+	int32 SpeechPeakAbsSentToAce = 0;
+	int32 LastVoiceRmsFloorUsed = 0;
+	bool bLoggedAceFaceParamsThisUtterance = false;
+	bool bLoggedAceRestPoseThisUtterance = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAudio2FaceParameters> AceFaceParameters;
 	bool bStreamStarted = false;
 	bool bFinished = false;
 	bool bLoggedFirstPcmChunk = false;
+	bool bLoggedSpeechGainThisUtterance = false;
 	bool bBoundAceAnimationStarted = false;
 	bool bBoundAceAnimationEnded = false;
 	bool bAcePlaybackEndedObserved = false;

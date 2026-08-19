@@ -44,6 +44,8 @@ DIRECT_SPEECH_CLASS = "/Script/UnrealPerformer.GodfreyDirectSpeechComponent"
 DIRECT_SPEECH_LABEL = "GodfreyDirectSpeech"
 QUEUE_POLL_CLASS = "/Script/UnrealPerformer.GodfreyExhibitionQueuePollComponent"
 QUEUE_POLL_LABEL = "GodfreyExhibitionQueuePoll"
+VOICE_INPUT_CLASS = "/Script/UnrealPerformer.GodfreyVoiceInputComponent"
+VOICE_INPUT_LABEL = "GodfreyVoiceInput"
 GM_GODFREY_EXHIBIT = "/Game/Godfrey/GM_Godfrey_Exhibit"
 GODFREY_CHARACTER_TAG = "GodfreyCharacter"
 FACE_ANIM_BP_PATH = "/Game/MetaHumans/Common/Face/Face_AnimBP"
@@ -684,6 +686,80 @@ def audit_gamemode_exhibition_queue(bp) -> dict[str, object]:
         "bPollOnBeginPlay": True,
         "PollIntervalSeconds": interval,
     }
+
+
+def add_voice_input(bp) -> bool:
+    return add_component_to_blueprint(bp, VOICE_INPUT_LABEL, VOICE_INPUT_CLASS, "actor")
+
+
+def configure_direct_speech_for_game_mic(bp) -> dict[str, str]:
+    """DirectSpeech on GM for game-mic replies; web queue poll remains separate."""
+    speech, label = find_component_by_class(bp, "GodfreyDirectSpeechComponent")
+    if not speech:
+        raise RuntimeError("GodfreyDirectSpeechComponent not found on GameMode")
+
+    changes: dict[str, str] = {"speech_label": label or DIRECT_SPEECH_LABEL}
+    for names, value, key in (
+        (["godfrey_brain_base_url", "GodfreyBrainBaseUrl"], "http://localhost:3000", "GodfreyBrainBaseUrl"),
+        (["ace_provider_name", "AceProviderName"], "LocalA2F-Mark", "AceProviderName"),
+        (["stream_sample_rate", "StreamSampleRate"], 24000, "StreamSampleRate"),
+        (["stream_num_channels", "StreamNumChannels"], 1, "StreamNumChannels"),
+        (["character_actor_tag", "CharacterActorTag"], GODFREY_CHARACTER_TAG, "CharacterActorTag"),
+        (["b_begin_thinking_on_submit", "bBeginThinkingOnSubmit"], True, "bBeginThinkingOnSubmit"),
+        (["b_return_to_listening_after_reply", "bReturnToListeningAfterReply"], True, "bReturnToListeningAfterReply"),
+        (["b_enable_dev_keyboard_submit", "bEnableDevKeyboardSubmit"], False, "bEnableDevKeyboardSubmit"),
+        (["b_auto_submit_test_prompt_on_begin_play", "bAutoSubmitTestPromptOnBeginPlay"], False, "bAutoSubmitTestPromptOnBeginPlay"),
+    ):
+        if set_prop(speech, names, value):
+            changes[key] = str(value)
+    return changes
+
+
+def configure_voice_input(bp) -> dict[str, str]:
+    voice, label = find_component_by_class(bp, "GodfreyVoiceInputComponent")
+    if not voice:
+        raise RuntimeError("GodfreyVoiceInputComponent not found on GameMode")
+
+    changes: dict[str, str] = {"voice_label": label or VOICE_INPUT_LABEL}
+    for names, value, key in (
+        (["godfrey_brain_base_url", "GodfreyBrainBaseUrl"], "http://localhost:3000", "GodfreyBrainBaseUrl"),
+        (["b_listen_on_begin_play", "bListenOnBeginPlay"], True, "bListenOnBeginPlay"),
+        (["b_pause_while_godfrey_speaking", "bPauseWhileGodfreySpeaking"], True, "bPauseWhileGodfreySpeaking"),
+        (["capture_sample_rate", "CaptureSampleRate"], 48000, "CaptureSampleRate"),
+        (["capture_num_channels", "CaptureNumChannels"], 1, "CaptureNumChannels"),
+        (["min_transcript_chars", "MinTranscriptChars"], 2, "MinTranscriptChars"),
+        (["reconnect_delay_seconds", "ReconnectDelaySeconds"], 2.0, "ReconnectDelaySeconds"),
+    ):
+        if set_prop(voice, names, value):
+            changes[key] = str(value)
+    return changes
+
+
+def audit_gamemode_game_mic(bp) -> dict[str, object]:
+    base = audit_gamemode_exhibition_queue(bp)
+
+    speech, speech_label = find_component_by_class(bp, "GodfreyDirectSpeechComponent")
+    if not speech:
+        raise RuntimeError("Missing GodfreyDirectSpeechComponent on GameMode (needed for game mic replies)")
+    if _get_bool_prop(speech, ("b_enable_dev_keyboard_submit", "bEnableDevKeyboardSubmit")) is not False:
+        raise RuntimeError("Game-mic DirectSpeech bEnableDevKeyboardSubmit must be False")
+
+    voice, voice_label = find_component_by_class(bp, "GodfreyVoiceInputComponent")
+    if not voice:
+        raise RuntimeError("Missing GodfreyVoiceInputComponent on GameMode")
+    if _get_bool_prop(voice, ("b_listen_on_begin_play", "bListenOnBeginPlay")) is not True:
+        raise RuntimeError("VoiceInput bListenOnBeginPlay must be True")
+
+    base.update(
+        {
+            "direct_speech_present": True,
+            "direct_speech_label": speech_label,
+            "voice_input_present": True,
+            "voice_input_label": voice_label,
+            "web_queue_poll_preserved": True,
+        }
+    )
+    return base
 
 
 def tag_godfrey_performer_in_level(performer_label: str = "BP_Godfrey_Performer") -> str:

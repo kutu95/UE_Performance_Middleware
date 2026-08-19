@@ -11,14 +11,20 @@
 ## 1. Current architecture
 
 ```
-Exhibition Brain (localhost:3000)
+Web path (unchanged):
+  Browser mic → Web Speech → POST /api/chat → exhibition TTS queue
         │
         ▼
 UGodfreyExhibitionQueuePollComponent  (GET /api/exhibition/unreal-tts-status)
-        │
+        │  ready → PullQueuedGodfreySpeechToAudio (ttsOnly)
+
+Game mic path (additive):
+  UE always-on mic → ws://Brain/api/unreal/stt → OpenAI Realtime STT (server_vad)
+        │  transcript_completed
         ▼
-UAsyncActionStreamGodfreySpeech::PullQueuedGodfreySpeechToAudio
-        │  POST /api/godfrey/speak/stream-pcm
+UGodfreyDirectSpeechComponent::AskGodfrey → POST /api/godfrey/speak/stream-pcm (text)
+
+Shared reply playback:
         ▼
 UGodfreyPcmStreamSession
         ├── AnimateFromAudioSamples → LocalA2F-Mark (NvAudio2FaceMark)
@@ -26,17 +32,21 @@ UGodfreyPcmStreamSession
         └── Parallel PCM audible (optional) → speakers
                 │
                 ▼
-UACEAudioCurveSourceComponent::OnAnimationStarted / OnAnimationEnded
-                │
-                ▼
 UGodfreyPerformanceStateComponent (BeginSpeaking / EndSpeaking)
                 │
                 ▼
-UGodfreyPerformerAnimationBridgeComponent (body montages — currently OFF by default)
+UGodfreyPerformerAnimationBridgeComponent (body montages — ON by default; AS_* library under Performances)
 ```
 
-**Character:** `BP_Godfrey_Performer` (Kristofer MetaHuman) in `Godfrey_World`.  
-**Game mode:** `GM_Godfrey_Exhibit`.
+**Character:** `BP_Godfrey_Performer` (Captain Godfrey / MHC) in `Godfrey_World`.  
+**Game mode:** `GM_Godfrey_Exhibit` (queue poll + optional VoiceInput/DirectSpeech).
+
+### Body performance library
+
+- Sequences: `/Game/Godfrey/Animation/Animation/Performances/AS_*`
+- Cue contract: `Docs/GodfreyPerformanceCueContract.md`
+- Catalog for middleware: `Config/GodfreyPerformanceActionCatalog.json`
+- Cook/runtime: `AS_*` / `AM_*` + body mesh/ABP. Authoring-only: `Perf_*`, Capture Manager media, `SK_*` companions.
 
 ### Runtime modules
 

@@ -1,7 +1,9 @@
 #include "GodfreyDiagnostics.h"
 
+#include "AudioMixerBlueprintLibrary.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/Paths.h"
 #include "UnrealPerformerGodfreySettings.h"
 
 DEFINE_LOG_CATEGORY(LogGodfreySpeech);
@@ -292,3 +294,47 @@ const TCHAR* UGodfreyDiagnosticsSubsystem::StageToLabel(EGodfreyUtteranceStage S
 	default: return TEXT("Unknown");
 	}
 }
+
+namespace GodfreyAudioCapture
+{
+	static bool bRecording = false;
+
+	static void RecordAudioCommand(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		if (!World)
+		{
+			Ar.Log(ELogVerbosity::Error, TEXT("Godfrey.RecordAudio: no world."));
+			return;
+		}
+
+		const bool bStart = Args.Num() == 0 ? !bRecording : Args[0].ToBool();
+		if (bStart == bRecording)
+		{
+			Ar.Logf(TEXT("Godfrey.RecordAudio: already %s."), bRecording ? TEXT("recording") : TEXT("stopped"));
+			return;
+		}
+
+		if (bStart)
+		{
+			// Master submix, so this captures exactly what reaches the speakers - ACE's own
+			// audio component included - rather than the PCM we handed to ACE.
+			UAudioMixerBlueprintLibrary::StartRecordingOutput(World, 0.f, nullptr);
+			bRecording = true;
+			Ar.Log(TEXT("Godfrey.RecordAudio: recording master submix. Run 'Godfrey.RecordAudio 0' to write the WAV."));
+			return;
+		}
+
+		const FString OutputDir = FPaths::ProjectSavedDir() / TEXT("GodfreyAudioCaptures");
+		const FString Name = FString::Printf(TEXT("GodfreyOutput_%s"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+		UAudioMixerBlueprintLibrary::StopRecordingOutput(
+			World, EAudioRecordingExportType::WavFile, Name, OutputDir, nullptr, nullptr);
+		bRecording = false;
+		Ar.Logf(TEXT("Godfrey.RecordAudio: wrote %s to %s"), *Name, *OutputDir);
+		UE_LOG(LogGodfreyAudio, Warning, TEXT("Godfrey.RecordAudio: wrote %s to %s"), *Name, *OutputDir);
+	}
+}
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GGodfreyRecordAudioCommand(
+	TEXT("Godfrey.RecordAudio"),
+	TEXT("Capture the master submix to a WAV. 'Godfrey.RecordAudio 1' to start, '0' to stop and write to Saved/GodfreyAudioCaptures."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&GodfreyAudioCapture::RecordAudioCommand));

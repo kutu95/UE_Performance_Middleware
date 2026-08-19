@@ -1,40 +1,22 @@
 #include "GodfreyBodyAnimInstance.h"
 
+#include "Animation/AnimData/BoneMaskFilter.h"
+#include "Animation/AnimSequence.h"
 #include "GodfreyPerformanceLog.h"
-#include "UnrealPerformerGodfreySettings.h"
 
 const FName UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName(TEXT("DefaultSlot"));
+const FName UGodfreyBodyAnimInstance::UpperBodyMontageSlotName(TEXT("UpperBody"));
+const FName UGodfreyBodyAnimInstance::UpperBodyBlendBoneName(TEXT("spine_01"));
+const FName UGodfreyBodyAnimInstance::NeckAimBoneName(TEXT("neck_01"));
 
 namespace
 {
-/**
- * spine_01 depth 4 = torso + clavicles (not full arm chain replace).
- * Mesh-space rotation blend keeps Mixamo gestures readable without MakeDynamicAdditive (which caused noodle arms).
- * Native custom graphs often report GetSlotMontageGlobalWeight==0 — Update() forces the layer when any montage is playing.
- */
-constexpr int32 GodfreyUpperBodyBlendDepth = 4;
-
-float GetConfiguredUpperBodyMontageBlendWeight()
-{
-	return GetDefault<UUnrealPerformerGodfreySettings>()->GodfreyUpperBodyMontageBlendWeight;
-}
-
-void ConfigureUpperBodyLayer(FAnimNode_LayeredBoneBlend& LayeredBlendNode)
-{
-	LayeredBlendNode.BlendMode = ELayeredBoneBlendMode::BranchFilter;
-	LayeredBlendNode.bMeshSpaceRotationBlend = true;
-	LayeredBlendNode.BlendPoses.SetNum(1);
-	LayeredBlendNode.BlendWeights.SetNum(1);
-	LayeredBlendNode.BlendWeights[0] = 0.f;
-	LayeredBlendNode.LayerSetup.SetNum(1);
-
-	FInputBlendPose LayerSetup;
-	FBranchFilter BranchFilter;
-	BranchFilter.BoneName = FName(TEXT("spine_01"));
-	BranchFilter.BlendDepth = GodfreyUpperBodyBlendDepth;
-	LayerSetup.BranchFilters.Add(BranchFilter);
-	LayeredBlendNode.LayerSetup[0] = LayerSetup;
-}
+const TCHAR* GGodfreyNeutralStancePaths[] = {
+	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_IdleStanding_01_EyeFixed.AS_IdleStanding_01_EyeFixed"),
+	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_IdleStanding_01.AS_IdleStanding_01"),
+	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_HandsClasped_01_EyeFixed.AS_HandsClasped_01_EyeFixed"),
+	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_HandsClasped_01.AS_HandsClasped_01"),
+};
 } // namespace
 
 FGodfreyBodyAnimInstanceProxy::FGodfreyBodyAnimInstanceProxy(UAnimInstance* InAnimInstance)
@@ -44,28 +26,44 @@ FGodfreyBodyAnimInstanceProxy::FGodfreyBodyAnimInstanceProxy(UAnimInstance* InAn
 
 void FGodfreyBodyAnimInstanceProxy::Initialize(UAnimInstance* InAnimInstance)
 {
-	FAnimInstanceProxy::Initialize(InAnimInstance);
 	ConstructNodes();
+	if (UGodfreyBodyAnimInstance* const BodyInst = Cast<UGodfreyBodyAnimInstance>(InAnimInstance))
+	{
+		BodyInst->EnsureNeutralStanceSequenceLoaded();
+		if (UAnimSequence* const Stance = BodyInst->GetNeutralStanceSequence())
+		{
+			NeutralStanceNode.SetSequence(Stance);
+		}
+	}
+	FAnimInstanceProxy::Initialize(InAnimInstance);
 
 	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyBodyAnimInstance: initialized (slot=%s, upper-body layered blend from spine_01 depth=%d weight=%.2f)."),
+		TEXT("GodfreyBodyAnimInstance: initialized (DefaultSlot=%s UpperBody=%s blendBone=%s neckLookAt=%s stance='%s')."),
 		*UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName.ToString(),
-		GodfreyUpperBodyBlendDepth,
-		GetConfiguredUpperBodyMontageBlendWeight());
+		*UGodfreyBodyAnimInstance::UpperBodyMontageSlotName.ToString(),
+		*UGodfreyBodyAnimInstance::UpperBodyBlendBoneName.ToString(),
+		*UGodfreyBodyAnimInstance::NeckAimBoneName.ToString(),
+		NeutralStanceNode.GetSequence() ? *NeutralStanceNode.GetSequence()->GetName() : TEXT("(none)"));
 }
 
 void FGodfreyBodyAnimInstanceProxy::Update(float DeltaSeconds)
 {
-	if (UAnimInstance* const AnimInst = Cast<UAnimInstance>(GetAnimInstanceObject()))
+	if (const UGodfreyBodyAnimInstance* const BodyInst = Cast<UGodfreyBodyAnimInstance>(GetAnimInstanceObject()))
 	{
-		// Native custom graphs often report GetSlotMontageGlobalWeight==0 even while Montage_Play is active.
-		float SlotWeight = AnimInst->GetSlotMontageGlobalWeight(UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName);
-		if (SlotWeight <= KINDA_SMALL_NUMBER && AnimInst->IsAnyMontagePlaying())
+		if (LayeredBlendNode.BlendWeights.Num() > 0)
 		{
-			SlotWeight = 1.f;
+			LayeredBlendNode.BlendWeights[0] = BodyInst->GetUpperBodyLayerWeight();
 		}
-		const float ConfigWeight = GetConfiguredUpperBodyMontageBlendWeight();
-		LayeredBlendNode.BlendWeights[0] = SlotWeight > KINDA_SMALL_NUMBER ? ConfigWeight : 0.f;
+		if (UAnimSequence* const Stance = BodyInst->GetNeutralStanceSequence())
+		{
+			if (NeutralStanceNode.GetSequence() != Stance)
+			{
+				NeutralStanceNode.SetSequence(Stance);
+			}
+		}
+		NeckLookAtNode.LookAtLocation = BodyInst->GetHeadAimWorldTarget();
+		NeckLookAtNode.LookAtClamp = BodyInst->GetHeadAimClampDegrees();
+		NeckLookAtNode.Alpha = BodyInst->GetHeadAimAlpha();
 	}
 
 	FAnimInstanceProxy::Update(DeltaSeconds);
@@ -78,22 +76,59 @@ FAnimNode_Base* FGodfreyBodyAnimInstanceProxy::GetCustomRootNode()
 
 void FGodfreyBodyAnimInstanceProxy::GetCustomNodes(TArray<FAnimNode_Base*>& OutNodes)
 {
-	OutNodes.Add(&RefPoseNode);
-	OutNodes.Add(&SlotNode);
+	OutNodes.Add(&NeutralStanceNode);
+	OutNodes.Add(&DefaultSlotNode);
+	OutNodes.Add(&UpperBodySlotNode);
 	OutNodes.Add(&LayeredBlendNode);
+	OutNodes.Add(&LocalToCSNode);
+	OutNodes.Add(&NeckLookAtNode);
+	OutNodes.Add(&CSToLocalNode);
 	OutNodes.Add(&RootNode);
 }
 
 void FGodfreyBodyAnimInstanceProxy::ConstructNodes()
 {
-	SlotNode.SlotName = UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName;
-	SlotNode.Source.SetLinkNode(&RefPoseNode);
+	NeutralStanceNode.SetLoopAnimation(true);
+	NeutralStanceNode.SetPlayRate(0.72f);
 
-	ConfigureUpperBodyLayer(LayeredBlendNode);
-	LayeredBlendNode.BasePose.SetLinkNode(&RefPoseNode);
-	LayeredBlendNode.BlendPoses[0].SetLinkNode(&SlotNode);
+	DefaultSlotNode.SlotName = UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName;
+	DefaultSlotNode.Source.SetLinkNode(&NeutralStanceNode);
 
-	RootNode.Result.SetLinkNode(&LayeredBlendNode);
+	UpperBodySlotNode.SlotName = UGodfreyBodyAnimInstance::UpperBodyMontageSlotName;
+	UpperBodySlotNode.Source.SetLinkNode(&DefaultSlotNode);
+
+	LayeredBlendNode.BlendMode = ELayeredBoneBlendMode::BranchFilter;
+	LayeredBlendNode.bMeshSpaceRotationBlend = true;
+	LayeredBlendNode.bBlendRootMotionBasedOnRootBone = true;
+	if (LayeredBlendNode.BlendPoses.Num() == 0)
+	{
+		LayeredBlendNode.AddPose();
+	}
+	LayeredBlendNode.BasePose.SetLinkNode(&DefaultSlotNode);
+	LayeredBlendNode.BlendPoses[0].SetLinkNode(&UpperBodySlotNode);
+	LayeredBlendNode.BlendWeights[0] = 0.f;
+
+	if (LayeredBlendNode.LayerSetup.Num() > 0)
+	{
+		FBranchFilter Filter;
+		Filter.BoneName = UGodfreyBodyAnimInstance::UpperBodyBlendBoneName;
+		Filter.BlendDepth = 0;
+		LayeredBlendNode.LayerSetup[0].BranchFilters.Reset();
+		LayeredBlendNode.LayerSetup[0].BranchFilters.Add(Filter);
+	}
+	LayeredBlendNode.InvalidatePerBoneBlendWeights();
+
+	LocalToCSNode.LocalPose.SetLinkNode(&LayeredBlendNode);
+
+	NeckLookAtNode.ComponentPose.SetLinkNode(&LocalToCSNode);
+	NeckLookAtNode.BoneToModify.BoneName = UGodfreyBodyAnimInstance::NeckAimBoneName;
+	NeckLookAtNode.LookAtClamp = 16.f;
+	NeckLookAtNode.InterpolationTime = 0.18f;
+	NeckLookAtNode.Alpha = 0.f;
+	NeckLookAtNode.bAlphaBoolEnabled = true;
+
+	CSToLocalNode.ComponentPose.SetLinkNode(&NeckLookAtNode);
+	RootNode.Result.SetLinkNode(&CSToLocalNode);
 }
 
 UGodfreyBodyAnimInstance::UGodfreyBodyAnimInstance(const FObjectInitializer& ObjectInitializer)
@@ -111,25 +146,100 @@ void UGodfreyBodyAnimInstance::DestroyAnimInstanceProxy(FAnimInstanceProxy* InPr
 	delete InProxy;
 }
 
+void UGodfreyBodyAnimInstance::EnsureNeutralStanceSequenceLoaded()
+{
+	if (IsValid(NeutralStanceSequence))
+	{
+		return;
+	}
+	for (const TCHAR* Path : GGodfreyNeutralStancePaths)
+	{
+		if (UAnimSequence* const Seq = LoadObject<UAnimSequence>(nullptr, Path))
+		{
+			NeutralStanceSequence = Seq;
+			return;
+		}
+	}
+}
+
+void UGodfreyBodyAnimInstance::SetNeutralStanceSequence(UAnimSequence* Sequence)
+{
+	if (IsValid(Sequence))
+	{
+		NeutralStanceSequence = Sequence;
+	}
+}
+
+void UGodfreyBodyAnimInstance::NativeInitializeAnimation()
+{
+	Super::NativeInitializeAnimation();
+	EnsureNeutralStanceSequenceLoaded();
+}
+
+void UGodfreyBodyAnimInstance::SetUpperBodyLayerWeight(const float NewWeight)
+{
+	UpperBodyLayerWeight = FMath::Clamp(NewWeight, 0.f, 1.f);
+}
+
+void UGodfreyBodyAnimInstance::SetConversationHeadAim(const bool bEnable, const FVector& WorldTarget,
+	const float ClampDegrees, const float Alpha)
+{
+	bHeadAimEnabled = bEnable;
+	HeadAimWorldTarget = WorldTarget;
+	HeadAimClampDegrees = FMath::Clamp(ClampDegrees, 1.f, 45.f);
+	HeadAimAlpha = FMath::Clamp(Alpha, 0.f, 1.f);
+}
+
 void UGodfreyBodyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
 	Super::NativeUpdateAnimation(DeltaSeconds);
+
+	if (!IsValid(NeutralStanceSequence))
+	{
+		EnsureNeutralStanceSequenceLoaded();
+	}
+	if (IsValid(NeutralStanceSequence) && !bLoggedNeutralStance)
+	{
+		bLoggedNeutralStance = true;
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyBodyAnimInstance: slot source is looping '%s' (not RefPose)."),
+			*NeutralStanceSequence->GetName());
+	}
+
+	if (bHeadAimEnabled && HeadAimAlpha > KINDA_SMALL_NUMBER)
+	{
+		if (!bLoggedHeadAim)
+		{
+			bLoggedHeadAim = true;
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyBodyAnimInstance: neck LookAt on — target=(%.1f,%.1f,%.1f) clamp=%.1f alpha=%.2f."),
+				HeadAimWorldTarget.X, HeadAimWorldTarget.Y, HeadAimWorldTarget.Z,
+				HeadAimClampDegrees, HeadAimAlpha);
+		}
+	}
+	else
+	{
+		bLoggedHeadAim = false;
+	}
 
 	if (bLoggedActiveSlotWeight)
 	{
 		return;
 	}
 
-	const float SlotWeight = GetSlotMontageGlobalWeight(DefaultBodyMontageSlotName);
+	const float DefaultWeight = GetSlotMontageGlobalWeight(DefaultBodyMontageSlotName);
+	const float UpperWeight = GetSlotMontageGlobalWeight(UpperBodyMontageSlotName);
 	const bool bMontageActive = IsAnyMontagePlaying();
-	if (SlotWeight <= KINDA_SMALL_NUMBER && !bMontageActive)
+	if (DefaultWeight <= KINDA_SMALL_NUMBER && UpperWeight <= KINDA_SMALL_NUMBER && !bMontageActive)
 	{
 		return;
 	}
 
 	bLoggedActiveSlotWeight = true;
 	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyBodyAnimInstance: DefaultSlot montage weight=%.2f montageActive=%d (upper-body layer active)."),
-		SlotWeight,
+		TEXT("GodfreyBodyAnimInstance: DefaultSlot=%.2f UpperBody=%.2f layer=%.2f montageActive=%d."),
+		DefaultWeight,
+		UpperWeight,
+		UpperBodyLayerWeight,
 		bMontageActive ? 1 : 0);
 }

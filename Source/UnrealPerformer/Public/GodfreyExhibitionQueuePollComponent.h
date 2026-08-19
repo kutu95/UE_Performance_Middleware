@@ -1,14 +1,23 @@
 #pragma once
 
 #include "UnrealPerformerApi.h"
+#include "AudioMixerBlueprintLibrary.h"
 #include "Components/ActorComponent.h"
 #include "GodfreyExhibitionQueuePollComponent.generated.h"
 
 class UAsyncActionStreamGodfreySpeech;
+class UGodfreyDirectSpeechComponent;
+class UGodfreyVoiceInputComponent;
 
 /**
  * Exhibition queue poll — mirrors legacy BP_GodfreyApiTest timer (~1s).
- * GET /api/exhibition/unreal-tts-status → when ready, PullQueuedGodfreySpeechToAudio → ACE on CharacterForAce.
+ * GET /api/exhibition/unreal-tts-status:
+ *   - phase=awaiting_reply → NotifyReplyIncoming (listening while LLM runs)
+ *   - ready → PullQueuedGodfreySpeechToAudio → ACE on CharacterForAce.
+ *
+ * Optionally auto-spawns DirectSpeech + VoiceInput on the same owner so the
+ * game microphone works without a separate Blueprint wiring step. Web queue
+ * polling stays enabled either way.
  */
 UCLASS(ClassGroup = (Godfrey), meta = (BlueprintSpawnableComponent))
 class UNREAL_PERFORMER_API UGodfreyExhibitionQueuePollComponent : public UActorComponent
@@ -43,6 +52,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Exhibition Queue")
 	bool bPollOnBeginPlay = true;
 
+	/**
+	 * If true, ensures GodfreyDirectSpeech + GodfreyVoiceInput exist on this actor
+	 * at BeginPlay (runtime spawn if missing). Web queue poll is unchanged.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Game Microphone")
+	bool bEnableGameMicrophone = true;
+
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Exhibition Queue")
 	void StartPolling();
 
@@ -58,8 +74,18 @@ protected:
 
 private:
 	AActor* ResolveCharacterForAce() const;
+	void EnsureGameMicrophoneComponents();
 	void PollOnce();
 	void ClearActiveStream();
+	void AbortAceStreamForEndPlay();
+	void BindExhibitCineCamera();
+	void EnsurePreferredPlaybackDevice();
+
+	UFUNCTION()
+	void HandleAvailableAudioOutputDevices(const TArray<FAudioOutputDeviceInfo>& AvailableDevices);
+
+	UFUNCTION()
+	void HandlePlaybackDeviceSwap(const FSwapAudioOutputResult& SwapResult);
 
 	UFUNCTION()
 	void HandleNoQueue();
@@ -73,5 +99,9 @@ private:
 	FTimerHandle PollTimerHandle;
 	UPROPERTY(Transient)
 	TObjectPtr<UAsyncActionStreamGodfreySpeech> ActiveStreamAction;
+	UPROPERTY(Transient)
+	TObjectPtr<UGodfreyDirectSpeechComponent> RuntimeDirectSpeech;
+	UPROPERTY(Transient)
+	TObjectPtr<UGodfreyVoiceInputComponent> RuntimeVoiceInput;
 	bool bStreamInProgress = false;
 };

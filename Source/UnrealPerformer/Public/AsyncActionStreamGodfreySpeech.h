@@ -13,6 +13,8 @@
 
 #include "Kismet/BlueprintAsyncActionBase.h"
 
+#include "TimerManager.h"
+
 
 
 #include <atomic>
@@ -91,6 +93,10 @@ public:
 
 	virtual void Activate() override;
 
+	/** Cancel HTTP + ACE ingest immediately (PIE stop / EndPlay). Does not broadcast OnError. */
+	UFUNCTION(BlueprintCallable, Category = "Audio|Godfrey|Streaming")
+	void Cancel();
+
 
 
 	UPROPERTY(BlueprintAssignable)
@@ -163,6 +169,13 @@ private:
 
 	void LogGodfreyPerformanceEventsFromStatusJson(const TSharedPtr<FJsonObject>& JsonObj);
 
+	/** Brain conversationEnd flag: latch the farewell so Unreal runs it after this reply is spoken. */
+	void TryLatchConversationEndFromStatusJson(const TSharedPtr<FJsonObject>& JsonObj);
+
+	/** Direct stream-pcm path: Brain sets X-Godfrey-Conversation-End on the PCM response. */
+	void TryLatchConversationEndFromStreamHeaders(const FHttpResponsePtr& Response);
+	void LatchConversationEndFromBrain(const FString& Source);
+
 
 
 	void TryForwardUtteranceStartedToPerformerIfNeeded();
@@ -177,7 +190,8 @@ private:
 
 	void HandleRequestProgress64(uint64 BytesReceived);
 
-	void HandleRequestCompleted(bool bConnectedSuccessfully, int32 ResponseCode, const FString& CompletionError);
+	void HandleRequestCompleted(bool bConnectedSuccessfully, int32 ResponseCode, const FString& CompletionError,
+		FHttpResponsePtr Response);
 
 	void ProcessPendingPcmBytes(bool bFlushFinal, int32* OptMaxPushesRemaining = nullptr);
 
@@ -185,9 +199,13 @@ private:
 
 	void ScheduleHttpBodyDrain();
 
+	void ScheduleHttpBodyDrainDelayed(float DelaySeconds);
+
 	void ProcessHttpBodyFifo_GameThread();
 
 	void TryFinishStreamAfterHttpComplete();
+
+	float GetHttpBodyDrainPaceDelaySeconds() const;
 
 	void CompletePullQueuedActionAfterPlayback();
 
@@ -249,8 +267,23 @@ private:
 
 	bool bHttpCompleteAwaitingFinish = false;
 
+	/** True while waiting on a paced/catch-up timer before next drain (avoids busy-loop AsyncTask). */
+	bool bHttpBodyDrainCatchUpDeferred = false;
+
 	/** Pull-queued mode: HTTP ingest done; defer OnFinished until ACE playback ends. */
 	bool bAwaitingPlaybackBeforeFinish = false;
+
+	/**
+	 * OnFinished has broadcast but ACE is still playing, so SetReadyToDestroy is held back.
+	 * Releasing the action here would drop the last reference to StreamSession, and garbage
+	 * collection would silently cancel its end-of-playback watchdog mid-utterance.
+	 */
+	bool bAwaitingPlaybackBeforeDestroy = false;
+
+	double AceEndCatchUpWaitStartPlatformSeconds = -1.0;
+	double LastAceCatchUpWaitLogPlatformSeconds = -1.0;
+
+	FTimerHandle HttpBodyDrainTimerHandle;
 
 	TArray<uint8> PendingBytes;
 
