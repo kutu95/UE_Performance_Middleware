@@ -1,0 +1,22 @@
+{
+  "profile_name": "RealityErrol",
+  "note": "Migrates assembled MH_RealityErrol (Reality Scan / Mesh-to-MetaHuman character) onto BP_Godfrey_Performer. Character definition lives at /Game/Actors/RealityErrol/MH_RealityErrol; assembled playable is BP_MH_RealityErrol. MHC_Errol remains the archived donor.",
+  "donor_blueprint": "/Game/MetaHumans/MH_RealityErrol/BP_MH_RealityErrol",
+  "performer_shell": "/Game/MetaHumans/Godfrey/BP_Godfrey_Performer",
+  "archive_bridge_shell": "/Game/MetaHumans/Godfrey/BP_Godfrey_Performer_MHC_Errol_Archive",
+  "pre_reality_errol_archive": "/Game/MetaHumans/Godfrey/BP_Godfrey_Performer_PreRealityErrol_Archive",
+  "forward_archive_if_rolled_back": "/Game/MetaHumans/Godfrey/BP_Godfrey_Performer_RealityErrol_Archive",
+  "freeze_script": "Scripts/freeze_pre_reality_errol_godfrey.py",
+  "restore_pre_reality_errol_script": "Scripts/restore_godfrey_performer_from_pre_reality_errol.py",
+  "character_definition": "/Game/Actors/RealityErrol/MH_RealityErrol",
+  "mesh_labels": ["Body", "Face", "SkeletalMesh", "SkeletalMesh1", "SkeletalMesh2"],
+  "face_anim_bp": "/Game/MetaHumans/Common/Face/Face_AnimBP",
+  "clothing_post_process": "/Game/MetaHumans/Common/Animation/ABP_Clothing_PostProcess",
+  "body_mesh": "/Game/MetaHumans/MH_RealityErrol/Body/SKM_MH_RealityErrol_BodyMesh",
+  "face_mesh": "/Game/MetaHumans/MH_RealityErrol/Face/SKM_MH_RealityErrol_FaceMesh",
+  "outfit": "/Game/Outfits/OA_Casual_formal",
+  "identity": "/Game/Actors/RealityErrol/Identity/SK_MI_RealityErrol",
+  "exhibition_wiring": "ACE + AceWarmup + PerformanceState + AnimationBridge (garments OFF; body montages as wired)",
+  "migration_script": "Scripts/migrate_reality_errol_to_godfrey_performer.py",
+  "level_swap_script": "Scripts/swap_godfrey_world_to_mhc_performer.py"
+}

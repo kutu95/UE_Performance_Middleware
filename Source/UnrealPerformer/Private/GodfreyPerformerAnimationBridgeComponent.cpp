@@ -13,6 +13,7 @@
 #include "Animation/AnimData/IAnimationDataModel.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
+#include "AlphaBlend.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimSingleNodeInstance.h"
 #include "Animation/AnimationAsset.h"
@@ -454,6 +455,8 @@ void ApplyBodyMontageBlendTimes(UAnimMontage* Montage, const EGodfreyIdleBlendPr
 	}
 	Montage->BlendIn.SetBlendTime(FMath::Max(0.05f, BlendIn));
 	Montage->BlendOut.SetBlendTime(FMath::Max(0.05f, BlendOut));
+	Montage->BlendIn.SetBlendOption(EAlphaBlendOption::HermiteCubic);
+	Montage->BlendOut.SetBlendOption(EAlphaBlendOption::HermiteCubic);
 }
 
 const TCHAR* AnimTickOptionToString(const EVisibilityBasedAnimTickOption Option)
@@ -3315,7 +3318,7 @@ void UGodfreyPerformerAnimationBridgeComponent::EnsurePlantedStancePlaying()
 	UAnimSequence* StanceSeq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(StanceStem));
 	if (!StanceSeq)
 	{
-		StanceSeq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(TEXT("HandsClasped_01")));
+		StanceSeq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(TEXT("IdleWeightShift_01")));
 	}
 	if (!StanceSeq)
 	{
@@ -4291,7 +4294,7 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayNamedPerformanceAction(const
 		{
 			if (ActiveSpeakingIdlePlayMontage && AnimInst->Montage_IsActive(ActiveSpeakingIdlePlayMontage))
 			{
-				AnimInst->Montage_Stop(GetSpeakingIdleMontageBlendOut(), ActiveSpeakingIdlePlayMontage);
+				AnimInst->Montage_Stop(GetDialogIdleMontageBlendOut(), ActiveSpeakingIdlePlayMontage);
 			}
 		}
 		const float SuppressSeconds = FMath::Max(0.35f, Montage->GetPlayLength() * 0.85f);
@@ -5189,12 +5192,12 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 	}
 
 	const bool bSeaIdleHold = IsSeaIdleHoldContext(ContextLabel);
-	const bool bSpeakingHold = ContextLabel && FCString::Stricmp(ContextLabel, TEXT("SpeakingIdle")) == 0;
-	const bool bDialogIdle = !bSpeakingHold
-		&& (IsDialogIdleHoldContext(ContextLabel) || (bSoftSlotReplace && !bSeaIdleHold));
+	// Upper-body conversation overlays (speaking pool, listening, in-place gestures)
+	// must use the long dialog blend — Body 0.45s made every AS→AS look like a snap.
+	const bool bConversationOverlay = bUseUpperBody && !bSeaIdleHold;
 	const EGodfreyIdleBlendProfile BlendProfile = bSeaIdleHold
 		? EGodfreyIdleBlendProfile::SeaIdle
-		: (bDialogIdle ? EGodfreyIdleBlendProfile::DialogIdle : EGodfreyIdleBlendProfile::Body);
+		: (bConversationOverlay ? EGodfreyIdleBlendProfile::DialogIdle : EGodfreyIdleBlendProfile::Body);
 	ApplyBodyMontageBlendTimes(PlayMontage, BlendProfile);
 	// Overlay plays must not stop DefaultSlot planted stance (default bStopAllMontages=true
 	// was blending the whole figure toward RefPose / A-pose between clips).
@@ -5207,7 +5210,7 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 	const double WorldTimeSeconds = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
 	const UAnimSequence* const PlaySeq = ExtractPrimarySequenceFromMontage(PlayMontage);
 	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyPerformerBridge [SeqStart]: t=%.3f context=%s montage='%s' source='%s' sequence='%s' rate=%.2f loop=%d chainHold=%d soft=%d wallLen=%.2f slot=%s travel=%d"),
+		TEXT("GodfreyPerformerBridge [SeqStart]: t=%.3f context=%s montage='%s' source='%s' sequence='%s' rate=%.2f loop=%d chainHold=%d soft=%d wallLen=%.2f slot=%s travel=%d blendIn=%.2f blendOut=%.2f"),
 		WorldTimeSeconds,
 		ContextLabel ? ContextLabel : TEXT("(none)"),
 		*PlayMontage->GetName(),
@@ -5219,7 +5222,9 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 		bSoftSlotReplace ? 1 : 0,
 		PlayLength,
 		*TargetSlot.ToString(),
-		bApplyRootMotion ? 1 : 0);
+		bApplyRootMotion ? 1 : 0,
+		PlayMontage->BlendIn.GetBlendTime(),
+		PlayMontage->BlendOut.GetBlendTime());
 	LogActingPlay(ContextLabel, PlayMontage, PlaySeq, PlayRate, bLoopMontage, PlayLength, PlayLength > KINDA_SMALL_NUMBER);
 
 	if (bUseUpperBody)
@@ -5230,7 +5235,7 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 			{
 				const float SoftOut = bSeaIdleHold
 					? GetSeaIdleMontageBlendOut()
-					: ((bDialogIdle || bSpeakingHold) ? GetDialogIdleMontageBlendOut() : GetBodyMontageBlendOut());
+					: (bConversationOverlay ? GetDialogIdleMontageBlendOut() : GetBodyMontageBlendOut());
 				AnimInst->Montage_Stop(SoftOut, Prev);
 			}
 		}
@@ -5741,6 +5746,11 @@ bool UGodfreyPerformerAnimationBridgeComponent::IsSeaIdleChainActive() const
 
 void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultSeaIdlePool()
 {
+	// Clasped-front idle drives hands/sleeves through the slim jacket (R23).
+	SeaIdleExhibitionPool.RemoveAll([](const FString& Stem)
+	{
+		return Stem.Contains(TEXT("HandsClasped"), ESearchCase::IgnoreCase);
+	});
 	if (SeaIdleExhibitionPool.Num() > 0)
 	{
 		return;
@@ -5753,7 +5763,6 @@ void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultSeaIdlePool()
 		TEXT("IdleWeightShift_01"),
 		TEXT("IdleRockingOnFeet_01"),
 		TEXT("HandsBehindBack_01"),
-		TEXT("HandsClasped_01"),
 	};
 }
 

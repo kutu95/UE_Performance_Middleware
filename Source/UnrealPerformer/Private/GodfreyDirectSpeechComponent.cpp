@@ -175,6 +175,20 @@ bool UGodfreyDirectSpeechComponent::AskGodfrey(const FString& PromptText)
 	return true;
 }
 
+void UGodfreyDirectSpeechComponent::AbortCurrentStream(const FString& Reason)
+{
+	UE_LOG(LogGodfreyDirectSpeech, Log, TEXT("AskGodfrey: aborting stream (%s)."), *Reason);
+
+	if (IsValid(ActiveStreamAction))
+	{
+		ActiveStreamAction->Cancel();
+	}
+	ActiveStreamAction = nullptr;
+	bIsStreaming = false;
+	UGodfreyPcmStreamSession::AbortActiveStreamForCharacter(ResolveCharacterForAce(), Reason);
+	NotifyPerformerListening();
+}
+
 void UGodfreyDirectSpeechComponent::StartStreamForPrompt(const FString& TrimmedPrompt)
 {
 	AActor* const AceCharacter = ResolveCharacterForAce();

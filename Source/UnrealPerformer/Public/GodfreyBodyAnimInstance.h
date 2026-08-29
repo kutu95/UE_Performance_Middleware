@@ -9,6 +9,7 @@
 #include "AnimNodes/AnimNode_LayeredBoneBlend.h"
 #include "AnimNodes/AnimNode_Slot.h"
 #include "BoneControllers/AnimNode_LookAt.h"
+#include "GodfreyCoatClearanceAnimNode.h"
 #include "GodfreyBodyAnimInstance.generated.h"
 
 class UAnimSequence;
@@ -17,7 +18,8 @@ class UAnimSequence;
  * Native MetaHuman body anim instance for Godfrey exhibition pass.
  *
  * Graph: looping IdleStanding → DefaultSlot (legs / travel) → UpperBody overlay from spine_01
- *        → optional clamped LookAt on neck_01 toward Exhibit_CineCamera → output.
+ *        → optional clamped LookAt on neck_01 toward Exhibit_CineCamera
+ *        → coat-clearance IK (hands/sleeves off the jacket) → output.
  * Slot source is never MetaHuman RefPose, so montage blend-out cannot drift into A-pose.
  */
 USTRUCT()
@@ -43,6 +45,7 @@ private:
 	FAnimNode_LayeredBoneBlend LayeredBlendNode;
 	FAnimNode_ConvertLocalToComponentSpace LocalToCSNode;
 	FAnimNode_LookAt NeckLookAtNode;
+	FAnimNode_GodfreyCoatClearance CoatClearanceNode;
 	FAnimNode_ConvertComponentToLocalSpace CSToLocalNode;
 	FAnimNode_Root RootNode;
 };

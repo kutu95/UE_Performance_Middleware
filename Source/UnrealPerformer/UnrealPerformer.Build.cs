@@ -11,6 +11,7 @@ public class UnrealPerformer : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"AnimationCore",
 			"AnimGraphRuntime",
 			"ControlRig",
 			"IKRig",

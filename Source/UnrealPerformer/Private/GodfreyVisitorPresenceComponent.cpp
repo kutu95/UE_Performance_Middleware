@@ -12,6 +12,7 @@
 #include "GodfreyDirectSpeechComponent.h"
 #include "GodfreyPerformanceStateComponent.h"
 #include "GodfreyPerformerAnimationBridgeComponent.h"
+#include "GodfreyVisitorBriefingComponent.h"
 #include "Kismet/KismetRenderingLibrary.h"
 #include "MediaPlayer.h"
 #include "MediaTexture.h"
@@ -80,6 +81,19 @@ void UGodfreyVisitorPresenceComponent::EndPlay(const EEndPlayReason::Type EndPla
 		World->GetTimerManager().ClearTimer(WelcomeSpeakTimerHandle);
 		World->GetTimerManager().ClearTimer(FarewellSpeakTimerHandle);
 	}
+	if (bBriefingFinishedBound)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			if (UGodfreyVisitorBriefingComponent* Briefing =
+				Owner->FindComponentByClass<UGodfreyVisitorBriefingComponent>())
+			{
+				Briefing->OnBriefingFinished.RemoveDynamic(
+					this, &UGodfreyVisitorPresenceComponent::HandleVisitorBriefingFinished);
+			}
+		}
+		bBriefingFinishedBound = false;
+	}
 	TearDownDebugPreview();
 	CloseWebcam();
 	Super::EndPlay(EndPlayReason);
@@ -114,6 +128,7 @@ void UGodfreyVisitorPresenceComponent::ApplyProjectSettingsDefaults()
 	EnterDwellSeconds = Settings->GodfreyWebcamEnterDwellSeconds;
 	LeaveDwellSeconds = Settings->GodfreyWebcamLeaveDwellSeconds;
 	OccupancyLeaveFractionThreshold = Settings->GodfreyWebcamOccupancyLeaveFractionThreshold;
+	AbandonedEmptyRecaptureDelaySeconds = Settings->GodfreyAbandonedEmptyRecaptureDelaySeconds;
 }
 
 void UGodfreyVisitorPresenceComponent::TickComponent(
@@ -243,6 +258,43 @@ void UGodfreyVisitorPresenceComponent::SetForceOccupied(bool bForce)
 {
 	bForceOccupied = bForce;
 	UE_LOG(LogGodfreyVision, Log, TEXT("VisitorPresence: forceOccupied=%d"), bForceOccupied ? 1 : 0);
+}
+
+void UGodfreyVisitorPresenceComponent::NotifyEncounterAbandonedWhileOccupied()
+{
+	if (VisitorSenseState != EGodfreyVisitorSenseState::Present
+		&& VisitorSenseState != EGodfreyVisitorSenseState::Leaving)
+	{
+		return;
+	}
+	bBlockPresenceWelcomeUntilVacated = true;
+	bPresenceWelcomeDeliveredThisVisit = false;
+	bPendingAbandonedEmptyRecapture = true;
+	AbandonedEmptyRecaptureCountdown = -1.f;
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(WelcomeSpeakTimerHandle);
+	}
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: encounter abandoned while occupied — Welcome blocked until empty recapture after SeaIdle (%.1fs)."),
+		AbandonedEmptyRecaptureDelaySeconds);
+}
+
+bool UGodfreyVisitorPresenceComponent::ShouldDeferVisitorSpeechForPresenceWelcome() const
+{
+	if (!bEnableWebcam || !bEngageOnPresence)
+	{
+		return false;
+	}
+	if (!IsWebcamOpen())
+	{
+		return false;
+	}
+	if (bBlockPresenceWelcomeUntilVacated)
+	{
+		return true;
+	}
+	return !bPresenceWelcomeDeliveredThisVisit;
 }
 
 void UGodfreyVisitorPresenceComponent::OpenWebcam()
@@ -649,6 +701,7 @@ void UGodfreyVisitorPresenceComponent::TickAnalysis(float DeltaTime)
 		BeginEmptyBackgroundCapture(TEXT("startup"), true);
 	}
 
+	TickAbandonedEmptyRecapture(DeltaTime);
 	TickEmptyBaselineMaintenance(DeltaTime);
 
 	EnsureAnalysisTarget();
@@ -1028,6 +1081,21 @@ void UGodfreyVisitorPresenceComponent::SetSenseState(EGodfreyVisitorSenseState N
 		*ActiveDeviceDisplayName);
 	OnVisitorSenseChanged.Broadcast(NewState, Previous, EstimatedVisitorCount);
 
+	if (NewState == EGodfreyVisitorSenseState::Empty)
+	{
+		if (UGodfreyVisitorBriefingComponent* Briefing = ResolveVisitorBriefing())
+		{
+			Briefing->NotifyZoneEmpty();
+		}
+		if (bBlockPresenceWelcomeUntilVacated)
+		{
+			UE_LOG(LogGodfreyVision, Log,
+				TEXT("VisitorPresence: zone empty — Welcome block cleared."));
+		}
+		bBlockPresenceWelcomeUntilVacated = false;
+		bPresenceWelcomeDeliveredThisVisit = false;
+	}
+
 	if (NewState == EGodfreyVisitorSenseState::Empty
 		&& (Previous == EGodfreyVisitorSenseState::Present
 			|| Previous == EGodfreyVisitorSenseState::Leaving)
@@ -1055,11 +1123,48 @@ void UGodfreyVisitorPresenceComponent::TryPresenceEngage()
 	{
 		return;
 	}
-	if (PerformerState->GetExhibitionPresence() != EGodfreyExhibitionPresence::SeaIdle)
+	if (bBlockPresenceWelcomeUntilVacated)
 	{
 		return;
 	}
-	if (PerformerState->HasEngagedVisitor() || PerformerState->IsInDialog())
+	if (bPresenceWelcomeDeliveredThisVisit)
+	{
+		return;
+	}
+
+	if (UGodfreyVisitorBriefingComponent* Briefing = ResolveVisitorBriefing())
+	{
+		if (Briefing->IsPlaying())
+		{
+			return;
+		}
+		if (Briefing->TryPlay())
+		{
+			UE_LOG(LogGodfreyVision, Log,
+				TEXT("VisitorPresence: holding Welcome for arrival briefing (inDialog=%d)."),
+				PerformerState->IsInDialog() ? 1 : 0);
+			return;
+		}
+	}
+
+	CompletePresenceEngage();
+}
+
+void UGodfreyVisitorPresenceComponent::CompletePresenceEngage()
+{
+	if (!bEngageOnPresence || !PerformerState)
+	{
+		return;
+	}
+	if (VisitorSenseState != EGodfreyVisitorSenseState::Present)
+	{
+		return;
+	}
+	if (bBlockPresenceWelcomeUntilVacated)
+	{
+		return;
+	}
+	if (bPresenceWelcomeDeliveredThisVisit)
 	{
 		return;
 	}
@@ -1071,12 +1176,51 @@ void UGodfreyVisitorPresenceComponent::TryPresenceEngage()
 	// New encounter — clear prior absence-farewell latch so a later leave can farewell again.
 	bPresenceFarewellRequested = false;
 	bPendingFarewellSpeak = false;
+	bPresenceWelcomeDeliveredThisVisit = true;
 	UE_LOG(LogGodfreyVision, Log,
-		TEXT("VisitorPresence: engaging from presence (Welcome armed) count=%d speak=%d"),
+		TEXT("VisitorPresence: engaging from presence (Welcome armed) count=%d speak=%d inDialog=%d"),
 		EstimatedVisitorCount,
-		bSpeakWelcomeOnPresence ? 1 : 0);
+		bSpeakWelcomeOnPresence ? 1 : 0,
+		PerformerState->IsInDialog() ? 1 : 0);
 	PerformerState->NotifyVisitorEngaged();
 	RequestWelcomeSpeak();
+}
+
+void UGodfreyVisitorPresenceComponent::HandleVisitorBriefingFinished()
+{
+	UE_LOG(LogGodfreyVision, Log, TEXT("VisitorPresence: arrival briefing finished."));
+	CompletePresenceEngage();
+}
+
+UGodfreyVisitorBriefingComponent* UGodfreyVisitorPresenceComponent::ResolveVisitorBriefing()
+{
+	AActor* const Owner = GetOwner();
+	if (!Owner)
+	{
+		return nullptr;
+	}
+
+	UGodfreyVisitorBriefingComponent* Briefing = Owner->FindComponentByClass<UGodfreyVisitorBriefingComponent>();
+	if (!Briefing)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				Briefing = (*It)->FindComponentByClass<UGodfreyVisitorBriefingComponent>();
+				if (Briefing)
+				{
+					break;
+				}
+			}
+		}
+	}
+	if (Briefing && !bBriefingFinishedBound)
+	{
+		Briefing->OnBriefingFinished.AddDynamic(this, &UGodfreyVisitorPresenceComponent::HandleVisitorBriefingFinished);
+		bBriefingFinishedBound = true;
+	}
+	return Briefing;
 }
 
 void UGodfreyVisitorPresenceComponent::RequestWelcomeSpeak()
@@ -1253,6 +1397,54 @@ void UGodfreyVisitorPresenceComponent::TickPendingFarewellSpeak(float DeltaTime)
 		}
 	}
 	HandleFarewellSpeakTimer();
+}
+
+void UGodfreyVisitorPresenceComponent::TickAbandonedEmptyRecapture(float DeltaTime)
+{
+	if (!bPendingAbandonedEmptyRecapture || bCapturingEmptyBackground || bStartupIgnoreActive)
+	{
+		return;
+	}
+
+	if (PerformerState)
+	{
+		const EGodfreyExhibitionPresence Presence = PerformerState->GetExhibitionPresence();
+		if (Presence == EGodfreyExhibitionPresence::Engaging
+			|| Presence == EGodfreyExhibitionPresence::Conversing)
+		{
+			bPendingAbandonedEmptyRecapture = false;
+			AbandonedEmptyRecaptureCountdown = -1.f;
+			UE_LOG(LogGodfreyVision, Log,
+				TEXT("VisitorPresence: abandoned empty recapture cancelled — visitor re-engaged by speech."));
+			return;
+		}
+		if (Presence != EGodfreyExhibitionPresence::SeaIdle)
+		{
+			// Farewell still playing — start the 2s wait only once looking-to-sea.
+			AbandonedEmptyRecaptureCountdown = -1.f;
+			return;
+		}
+	}
+
+	if (AbandonedEmptyRecaptureCountdown < 0.f)
+	{
+		AbandonedEmptyRecaptureCountdown = FMath::Max(0.5f, AbandonedEmptyRecaptureDelaySeconds);
+		UE_LOG(LogGodfreyVision, Log,
+			TEXT("VisitorPresence: SeaIdle — recapturing empty background in %.1fs."),
+			AbandonedEmptyRecaptureCountdown);
+	}
+
+	AbandonedEmptyRecaptureCountdown -= DeltaTime;
+	if (AbandonedEmptyRecaptureCountdown > 0.f)
+	{
+		return;
+	}
+
+	bPendingAbandonedEmptyRecapture = false;
+	AbandonedEmptyRecaptureCountdown = -1.f;
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: unanswered-leave empty recapture — treating current frame as vacant room."));
+	BeginEmptyBackgroundCapture(TEXT("unanswered-idle"), true);
 }
 
 void UGodfreyVisitorPresenceComponent::TickEmptyBaselineMaintenance(float DeltaTime)

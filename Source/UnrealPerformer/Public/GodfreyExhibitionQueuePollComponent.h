@@ -68,6 +68,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Exhibition Queue")
 	bool IsStreamActive() const { return bStreamInProgress; }
 
+	/** True only after queued TTS actually started — not during the empty 1s status poll. */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Exhibition Queue")
+	bool IsQueuedSpeechPlaying() const { return bQueuedSpeechPlaying; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -104,4 +108,5 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UGodfreyVoiceInputComponent> RuntimeVoiceInput;
 	bool bStreamInProgress = false;
+	bool bQueuedSpeechPlaying = false;
 };

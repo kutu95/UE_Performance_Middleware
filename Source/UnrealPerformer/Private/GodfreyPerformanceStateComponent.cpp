@@ -80,6 +80,7 @@ void UGodfreyPerformanceStateComponent::BeginPlay()
 	{
 		DialogEngageSilenceSeconds = Settings->GodfreyDialogEngageSilenceSeconds;
 		bEnableDialogEngagementPrompts = Settings->bGodfreyEnableDialogEngagementPrompts;
+		DialogEngageMaxUnansweredAttempts = Settings->GodfreyDialogEngageMaxUnansweredAttempts;
 		if (!Settings->GodfreyDialogEngagePrompt.IsEmpty())
 		{
 			DialogEngagePrompt = Settings->GodfreyDialogEngagePrompt;
@@ -140,8 +141,10 @@ void UGodfreyPerformanceStateComponent::NotifyVisitorActivity()
 void UGodfreyPerformanceStateComponent::NotifyVisitorSpeechBegan()
 {
 	NotifyVisitorActivity();
+	ResetUnansweredDialogEngages();
 	// End silent-period clock as soon as the visitor starts talking (not when STT final arrives).
 	LastDialogExchangeWorldTime = -1.0;
+	AbortDialogEngagePromptIfInFlight(TEXT("visitor speech_started"));
 	UE_LOG(LogGodfreyPerformance, Log,
 		TEXT("GodfreyPerformer: visitor speech began — dialog engage timer cleared."));
 }
@@ -166,6 +169,7 @@ void UGodfreyPerformanceStateComponent::NotifyVisitorSpeechEnded()
 void UGodfreyPerformanceStateComponent::NotifyVisitorSpoke()
 {
 	NotifyVisitorActivity();
+	ResetUnansweredDialogEngages();
 	// Anyone speaking ends the silent period; clock restarts only when Speak goes green again.
 	LastDialogExchangeWorldTime = -1.0;
 }
@@ -202,6 +206,8 @@ void UGodfreyPerformanceStateComponent::EnterSeaIdlePresence()
 	bHasEngagedVisitor = false;
 	PendingPostEngageState = EGodfreyPerformanceState::Idle;
 	LastDialogExchangeWorldTime = -1.0;
+	bDialogEngagePromptInFlight = false;
+	ResetUnansweredDialogEngages();
 	SetExhibitionPresence(EGodfreyExhibitionPresence::SeaIdle);
 	TrySetPerformanceState(EGodfreyPerformanceState::Idle);
 	OnSeaIdleStarted.Broadcast();
@@ -234,6 +240,7 @@ void UGodfreyPerformanceStateComponent::NotifyVisitorEngaged()
 	}
 
 	NotifyVisitorActivity();
+	ResetUnansweredDialogEngages();
 
 	if (ExhibitionPresence == EGodfreyExhibitionPresence::Farewell)
 	{
@@ -441,6 +448,10 @@ void UGodfreyPerformanceStateComponent::TickDialogEngagement(float /*DeltaTime*/
 	{
 		return;
 	}
+	if (bDialogEngagePromptInFlight)
+	{
+		return;
+	}
 	if (!bHasEngagedVisitor || ExhibitionPresence != EGodfreyExhibitionPresence::Conversing)
 	{
 		return;
@@ -471,6 +482,13 @@ void UGodfreyPerformanceStateComponent::TickDialogEngagement(float /*DeltaTime*/
 	const double Silence = World->GetTimeSeconds() - LastDialogExchangeWorldTime;
 	if (Silence < static_cast<double>(DialogEngageSilenceSeconds))
 	{
+		return;
+	}
+
+	if (DialogEngageMaxUnansweredAttempts > 0
+		&& DialogEngageUnansweredCount >= DialogEngageMaxUnansweredAttempts)
+	{
+		AssumeVisitorLeftAfterUnansweredEngages();
 		return;
 	}
 
@@ -551,41 +569,32 @@ bool UGodfreyPerformanceStateComponent::IsGodfreyBusyForDialogEngage() const
 	{
 		return true;
 	}
+	if (UGodfreyDirectSpeechComponent* Speech = FindDirectSpeech())
+	{
+		if (Speech->IsStreaming())
+		{
+			return true;
+		}
+	}
 	return false;
 }
 
 bool UGodfreyPerformanceStateComponent::TryFireDialogEngagementPrompt()
 {
+	if (!IsVisitorListenWindowOpen())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: dialog engagement skipped — incoming visitor speech."));
+		return false;
+	}
+
 	const FString Prompt = DialogEngagePrompt.TrimStartAndEnd();
 	if (Prompt.IsEmpty())
 	{
 		return false;
 	}
 
-	UGodfreyDirectSpeechComponent* Speech = nullptr;
-	if (AActor* Owner = GetOwner())
-	{
-		Speech = Owner->FindComponentByClass<UGodfreyDirectSpeechComponent>();
-	}
-	if (!Speech)
-	{
-		if (UWorld* World = GetWorld())
-		{
-			for (TActorIterator<AActor> It(World); It; ++It)
-			{
-				AActor* Actor = *It;
-				if (!IsValid(Actor))
-				{
-					continue;
-				}
-				if (UGodfreyDirectSpeechComponent* Found = Actor->FindComponentByClass<UGodfreyDirectSpeechComponent>())
-				{
-					Speech = Found;
-					break;
-				}
-			}
-		}
-	}
+	UGodfreyDirectSpeechComponent* Speech = FindDirectSpeech();
 	if (!Speech || Speech->IsStreaming())
 	{
 		return false;
@@ -597,9 +606,16 @@ bool UGodfreyPerformanceStateComponent::TryFireDialogEngagementPrompt()
 	NotifyVisitorActivity();
 
 	const bool bOk = Speech->AskGodfrey(Prompt);
+	if (bOk)
+	{
+		++DialogEngageUnansweredCount;
+		bDialogEngagePromptInFlight = true;
+	}
 	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyPerformer: dialog engagement AskGodfrey ok=%d (need %.1fs Speak-green silence)"),
+		TEXT("GodfreyPerformer: dialog engagement AskGodfrey ok=%d unanswered=%d/%d (need %.1fs Speak-green silence)"),
 		bOk ? 1 : 0,
+		DialogEngageUnansweredCount,
+		DialogEngageMaxUnansweredAttempts,
 		DialogEngageSilenceSeconds);
 	if (!bOk)
 	{
@@ -607,6 +623,94 @@ bool UGodfreyPerformanceStateComponent::TryFireDialogEngagementPrompt()
 		LastDialogExchangeWorldTime = -1.0;
 	}
 	return bOk;
+}
+
+void UGodfreyPerformanceStateComponent::ResetUnansweredDialogEngages()
+{
+	if (DialogEngageUnansweredCount <= 0)
+	{
+		return;
+	}
+	UE_LOG(LogGodfreyPerformance, Verbose,
+		TEXT("GodfreyPerformer: unanswered dialog engages reset (was %d)."), DialogEngageUnansweredCount);
+	DialogEngageUnansweredCount = 0;
+}
+
+UGodfreyDirectSpeechComponent* UGodfreyPerformanceStateComponent::FindDirectSpeech() const
+{
+	if (AActor* Owner = GetOwner())
+	{
+		if (UGodfreyDirectSpeechComponent* Speech = Owner->FindComponentByClass<UGodfreyDirectSpeechComponent>())
+		{
+			return Speech;
+		}
+	}
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!IsValid(Actor))
+		{
+			continue;
+		}
+		if (UGodfreyDirectSpeechComponent* Found = Actor->FindComponentByClass<UGodfreyDirectSpeechComponent>())
+		{
+			return Found;
+		}
+	}
+	return nullptr;
+}
+
+void UGodfreyPerformanceStateComponent::AbortDialogEngagePromptIfInFlight(const TCHAR* Reason)
+{
+	if (!bDialogEngagePromptInFlight)
+	{
+		return;
+	}
+	bDialogEngagePromptInFlight = false;
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformer: aborting dialog engagement prompt (%s)."), Reason ? Reason : TEXT("unknown"));
+	if (UGodfreyDirectSpeechComponent* Speech = FindDirectSpeech())
+	{
+		Speech->AbortCurrentStream(Reason ? FString(Reason) : FString(TEXT("dialog engage abort")));
+	}
+}
+
+void UGodfreyPerformanceStateComponent::NotifyPresenceEncounterAbandoned()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!IsValid(Actor))
+		{
+			continue;
+		}
+		if (UGodfreyVisitorPresenceComponent* Presence =
+			Actor->FindComponentByClass<UGodfreyVisitorPresenceComponent>())
+		{
+			Presence->NotifyEncounterAbandonedWhileOccupied();
+		}
+	}
+}
+
+void UGodfreyPerformanceStateComponent::AssumeVisitorLeftAfterUnansweredEngages()
+{
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformer: %d unanswered engagement prompt(s) — assuming visitor left, waiting for next."),
+		DialogEngageUnansweredCount);
+	LastDialogExchangeWorldTime = -1.0;
+	NotifyPresenceEncounterAbandoned();
+	ResetUnansweredDialogEngages();
+	BeginFarewell();
 }
 
 bool UGodfreyPerformanceStateComponent::LooksLikeFarewellCue(const FString& CueType, const FString& CueValue) const
@@ -883,6 +987,7 @@ void UGodfreyPerformanceStateComponent::NotifyUtteranceStarted()
 void UGodfreyPerformanceStateComponent::NotifyUtteranceEnded()
 {
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: NotifyUtteranceEnded"));
+	bDialogEngagePromptInFlight = false;
 	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
 	{
 		Diag->MarkStageForCurrent(EGodfreyUtteranceStage::BehaviourFinished);

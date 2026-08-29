@@ -10,6 +10,7 @@
 #include "GodfreyPerformanceStateComponent.h"
 #include "GodfreyPerformanceTypes.h"
 #include "GodfreyPerformerAnimationBridgeComponent.h"
+#include "GodfreyVisitorPresenceComponent.h"
 #include "IWebSocket.h"
 #include "Modules/ModuleManager.h"
 #include "Serialization/JsonReader.h"
@@ -62,6 +63,65 @@ namespace GodfreyVoiceInputPrivate
 			return true;
 		}
 		return false;
+	}
+
+	/** gpt-4o-mini-transcribe invents Tom/Visitor exhibit scripts from the STT prompt on room tone. */
+	static bool LooksLikeSttRoleplayHallucination(const FString& Transcript)
+	{
+		TArray<FString> Lines;
+		Transcript.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
+		int32 SpeakerLabels = 0;
+		for (const FString& Line : Lines)
+		{
+			const FString T = Line.TrimStartAndEnd();
+			int32 ColonIdx = INDEX_NONE;
+			if (!T.FindChar(TEXT(':'), ColonIdx) || ColonIdx < 2 || ColonIdx > 24)
+			{
+				continue;
+			}
+			const FString Name = T.Left(ColonIdx).TrimStartAndEnd();
+			bool bLetters = Name.Len() >= 2;
+			for (const TCHAR C : Name)
+			{
+				if (!FChar::IsAlpha(C) && C != TEXT(' ') && C != TEXT('\''))
+				{
+					bLetters = false;
+					break;
+				}
+			}
+			if (bLetters)
+			{
+				++SpeakerLabels;
+			}
+		}
+		if (SpeakerLabels >= 2)
+		{
+			return true;
+		}
+		const FString Lower = Transcript.ToLower();
+		return Lower.Contains(TEXT("tom:")) &&
+			(Lower.Contains(TEXT("visitor:")) || Lower.Contains(TEXT("godfrey:")));
+	}
+
+	static FString MergeVisitorTranscripts(const FString& Held, const FString& Next)
+	{
+		if (Held.IsEmpty())
+		{
+			return Next;
+		}
+		if (Next.IsEmpty())
+		{
+			return Held;
+		}
+		if (Next.StartsWith(Held))
+		{
+			return Next;
+		}
+		if (Held.Contains(Next) && Held.Len() >= Next.Len())
+		{
+			return Held;
+		}
+		return Held + TEXT(" ") + Next;
 	}
 
 	/** OpenAI transcribe often emits these on room tone / speaker tail. Never a visitor name. */
@@ -191,6 +251,34 @@ namespace GodfreyVoiceInputPrivate
 		return nullptr;
 	}
 
+	static UGodfreyVisitorPresenceComponent* ResolveVisitorPresence(const UGodfreyVoiceInputComponent* Voice)
+	{
+		if (!Voice)
+		{
+			return nullptr;
+		}
+		if (AActor* Owner = Voice->GetOwner())
+		{
+			if (UGodfreyVisitorPresenceComponent* OnOwner =
+				Owner->FindComponentByClass<UGodfreyVisitorPresenceComponent>())
+			{
+				return OnOwner;
+			}
+		}
+		if (UWorld* World = Voice->GetWorld())
+		{
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				if (UGodfreyVisitorPresenceComponent* Found =
+					(*It)->FindComponentByClass<UGodfreyVisitorPresenceComponent>())
+				{
+					return Found;
+				}
+			}
+		}
+		return nullptr;
+	}
+
 	static FString HttpToWsBase(const FString& HttpBase)
 	{
 		FString Base = HttpBase.TrimStartAndEnd();
@@ -286,9 +374,9 @@ void UGodfreyVoiceInputComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	}
 	bWasGodfreySpeaking = bSpeakingNow;
 
-	if (bPauseWhileGodfreySpeaking)
+	if (bPauseWhileGodfreySpeaking || bBriefingHold)
 	{
-		const bool bShouldPause = IsGodfreySpeaking() || IsInPostSpeechIgnore();
+		const bool bShouldPause = IsGodfreySpeaking() || IsInPostSpeechIgnore() || bBriefingHold;
 		if (bShouldPause != bMicPaused)
 		{
 			SetMicPaused(bShouldPause);
@@ -343,6 +431,10 @@ bool UGodfreyVoiceInputComponent::CanVisitorSpeak() const
 	{
 		return false;
 	}
+	if (bBriefingHold)
+	{
+		return false;
+	}
 	if (IsGodfreySpeaking() || IsInPostSpeechIgnore())
 	{
 		return false;
@@ -352,6 +444,23 @@ bool UGodfreyVoiceInputComponent::CanVisitorSpeak() const
 
 bool UGodfreyVoiceInputComponent::IsGodfreySpeaking() const
 {
+	AActor* const Character = GodfreyVoiceInputPrivate::ResolveGodfreyCharacter(this);
+	if (Character)
+	{
+		if (const UGodfreyPerformanceStateComponent* Perf =
+			Character->FindComponentByClass<UGodfreyPerformanceStateComponent>())
+		{
+			// Keep the mic live while an R10 quiet-nudge is waiting on Brain/ACE so
+			// speech_started can abort it. Pause again once ACE is actually audible
+			// (speaker→mic echo would otherwise look like visitor speech).
+			if (Perf->IsDialogEngagePromptInFlight()
+				&& !UGodfreyPcmStreamSession::IsCharacterAudiblePlaybackActive(Character))
+			{
+				return false;
+			}
+		}
+	}
+
 	if (IsValid(DirectSpeech) && DirectSpeech->IsStreaming())
 	{
 		return true;
@@ -361,7 +470,7 @@ bool UGodfreyVoiceInputComponent::IsGodfreySpeaking() const
 	{
 		if (const UGodfreyExhibitionQueuePollComponent* Poll = Owner->FindComponentByClass<UGodfreyExhibitionQueuePollComponent>())
 		{
-			if (Poll->IsStreamActive())
+			if (Poll->IsQueuedSpeechPlaying())
 			{
 				return true;
 			}
@@ -377,7 +486,7 @@ bool UGodfreyVoiceInputComponent::IsGodfreySpeaking() const
 
 	// Hold-play: HTTP stream ends before audible starts — keep mic paused through Thinking/Speaking.
 	// Also: HTTP FinishStream clears IsStreaming while ACE may still play for many seconds (speaker→mic feedback).
-	if (AActor* const Character = GodfreyVoiceInputPrivate::ResolveGodfreyCharacter(this))
+	if (Character)
 	{
 		if (UGodfreyPcmStreamSession::IsCharacterAudiblePlaybackActive(Character))
 		{
@@ -453,7 +562,10 @@ void UGodfreyVoiceInputComponent::StopListening()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(ReconnectTimerHandle);
+		World->GetTimerManager().ClearTimer(VisitorTurnCommitTimerHandle);
 	}
+	PendingVisitorTranscript.Reset();
+	bHadSpeechStartedSinceUnpause = false;
 
 	DisconnectSttWebSocket();
 	CloseCaptureStream();
@@ -465,11 +577,28 @@ void UGodfreyVoiceInputComponent::StopListening()
 
 	bListening = false;
 	bMicPaused = false;
+	bBriefingHold = false;
 	bServerReady = false;
 	bSpeechActive = false;
 	SetComponentTickEnabled(false);
 
 	UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: listening stopped."));
+}
+
+void UGodfreyVoiceInputComponent::SetBriefingHold(bool bHold)
+{
+	if (bBriefingHold == bHold)
+	{
+		return;
+	}
+
+	bBriefingHold = bHold;
+	const bool bShouldPause = bBriefingHold || IsGodfreySpeaking() || IsInPostSpeechIgnore();
+	if (bListening)
+	{
+		SetMicPaused(bShouldPause);
+	}
+	UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: briefing hold=%d"), bHold ? 1 : 0);
 }
 
 void UGodfreyVoiceInputComponent::SetMicPaused(bool bPaused)
@@ -483,18 +612,18 @@ void UGodfreyVoiceInputComponent::SetMicPaused(bool bPaused)
 	if (bPaused)
 	{
 		SendControl(TEXT("pause"));
+		FScopeLock Lock(&CaptureMutex);
+		PendingPcm16.Reset();
+		ResetVisitorTurnAfterMicClosed();
 	}
 	else
 	{
 		SendControl(TEXT("clear"));
 		SendControl(TEXT("resume"));
-	}
-
-	if (bPaused)
-	{
-		FScopeLock Lock(&CaptureMutex);
-		PendingPcm16.Reset();
+		bHadSpeechStartedSinceUnpause = false;
 		bSpeechActive = false;
+		PendingVisitorTranscript.Reset();
+		ClearVisitorTurnCommitTimer();
 	}
 
 	UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: mic %s"), bPaused ? TEXT("paused") : TEXT("resumed"));
@@ -832,9 +961,17 @@ void UGodfreyVoiceInputComponent::HandleSocketMessage(const FString& Message)
 
 	if (Type == TEXT("speech_started"))
 	{
+		if (ShouldIgnoreIncomingStt())
+		{
+			UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: ignored speech_started (mic closed)."));
+			return;
+		}
 		bSpeechActive = true;
+		bHadSpeechStartedSinceUnpause = true;
+		ClearVisitorTurnCommitTimer();
 		ArmAwaitingFinalTranscript();
 		OnSpeechStarted.Broadcast();
+		UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: speech_started (lantern stays Speak)."));
 		if (AActor* const Character = GodfreyVoiceInputPrivate::ResolveGodfreyCharacter(this))
 		{
 			if (UGodfreyPerformanceStateComponent* Perf =
@@ -848,9 +985,16 @@ void UGodfreyVoiceInputComponent::HandleSocketMessage(const FString& Message)
 
 	if (Type == TEXT("speech_stopped"))
 	{
+		if (ShouldIgnoreIncomingStt() || !bHadSpeechStartedSinceUnpause || !bSpeechActive)
+		{
+			UE_LOG(LogGodfreyVoiceInput, Log,
+				TEXT("GodfreyVoiceInput: ignored speech_stopped (stale/orphan VAD after resume)."));
+			return;
+		}
 		bSpeechActive = false;
 		ScheduleMissedTranscriptWatch();
 		OnSpeechStopped.Broadcast();
+		UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: speech_stopped."));
 		if (AActor* const Character = GodfreyVoiceInputPrivate::ResolveGodfreyCharacter(this))
 		{
 			if (UGodfreyPerformanceStateComponent* Perf =
@@ -858,6 +1002,10 @@ void UGodfreyVoiceInputComponent::HandleSocketMessage(const FString& Message)
 			{
 				Perf->NotifyVisitorSpeechEnded();
 			}
+		}
+		if (!PendingVisitorTranscript.IsEmpty())
+		{
+			ScheduleVisitorTurnCommit();
 		}
 		return;
 	}
@@ -956,11 +1104,28 @@ void UGodfreyVoiceInputComponent::HandleTranscriptMissed(const FString& Reason)
 	{
 		return;
 	}
+	if (UGodfreyVisitorPresenceComponent* Presence = GodfreyVoiceInputPrivate::ResolveVisitorPresence(this))
+	{
+		if (Presence->ShouldDeferVisitorSpeechForPresenceWelcome())
+		{
+			UE_LOG(LogGodfreyVoiceInput, Log,
+				TEXT("GodfreyVoiceInput: holding missed STT until arrival briefing/Welcome (reason=%s)"),
+				*Reason);
+			if (!bSpeechActive)
+			{
+				ClearAwaitingFinalTranscript();
+			}
+			return;
+		}
+	}
 	if (Reason.Equals(TEXT("hallucination"), ESearchCase::IgnoreCase))
 	{
 		UE_LOG(LogGodfreyVoiceInput, Log,
 			TEXT("GodfreyVoiceInput: dropped STT noise-hallucination (no please-repeat)"));
-		ClearAwaitingFinalTranscript();
+		if (!bSpeechActive)
+		{
+			ClearAwaitingFinalTranscript();
+		}
 		return;
 	}
 	TryFireMissedTranscriptPrompt(Reason);
@@ -975,10 +1140,10 @@ bool UGodfreyVoiceInputComponent::TryFireMissedTranscriptPrompt(const FString& R
 
 	ClearAwaitingFinalTranscript();
 
-	if (IsGodfreySpeaking() || IsInPostSpeechIgnore())
+	if (IsGodfreySpeaking() || IsInPostSpeechIgnore() || bSpeechActive)
 	{
 		UE_LOG(LogGodfreyVoiceInput, Log,
-			TEXT("GodfreyVoiceInput: skipped missed-transcript prompt (Godfrey busy) reason=%s"), *Reason);
+			TEXT("GodfreyVoiceInput: skipped missed-transcript prompt (Godfrey busy or visitor still speaking) reason=%s"), *Reason);
 		return false;
 	}
 
@@ -1019,6 +1184,18 @@ bool UGodfreyVoiceInputComponent::TryFireMissedTranscriptPrompt(const FString& R
 
 void UGodfreyVoiceInputComponent::HandleFinalTranscript(const FString& Transcript)
 {
+	if (UGodfreyVisitorPresenceComponent* Presence = GodfreyVoiceInputPrivate::ResolveVisitorPresence(this))
+	{
+		if (Presence->ShouldDeferVisitorSpeechForPresenceWelcome())
+		{
+			UE_LOG(LogGodfreyVoiceInput, Log,
+				TEXT("GodfreyVoiceInput: holding STT until arrival briefing/Welcome: '%s'"),
+				*Transcript);
+			ClearAwaitingFinalTranscript();
+			return;
+		}
+	}
+
 	if (Transcript.Len() < MinTranscriptChars)
 	{
 		UE_LOG(LogGodfreyVoiceInput, Verbose,
@@ -1043,7 +1220,22 @@ void UGodfreyVoiceInputComponent::HandleFinalTranscript(const FString& Transcrip
 		return;
 	}
 
+	if (GodfreyVoiceInputPrivate::LooksLikeSttRoleplayHallucination(Transcript))
+	{
+		UE_LOG(LogGodfreyVoiceInput, Warning,
+			TEXT("GodfreyVoiceInput: dropping STT roleplay-hallucination transcript '%s'"), *Transcript);
+		HandleTranscriptMissed(TEXT("hallucination"));
+		return;
+	}
+
 	const bool bFarewell = GodfreyVoiceInputPrivate::LooksLikeVisitorFarewell(Transcript);
+	if (!bHadSpeechStartedSinceUnpause && !bFarewell)
+	{
+		UE_LOG(LogGodfreyVoiceInput, Log,
+			TEXT("GodfreyVoiceInput: dropping stale STT (no speech_started since mic resume): %s"), *Transcript);
+		return;
+	}
+
 	if (IsGodfreySpeaking() || IsInPostSpeechIgnore())
 	{
 		if (bFarewell)
@@ -1060,8 +1252,15 @@ void UGodfreyVoiceInputComponent::HandleFinalTranscript(const FString& Transcrip
 		return;
 	}
 
-	ClearAwaitingFinalTranscript();
-	QueueOrSendVisitorTranscript(Transcript, bFarewell);
+	AbsorbVisitorTranscript(Transcript);
+	if (bSpeechActive)
+	{
+		UE_LOG(LogGodfreyVoiceInput, Log,
+			TEXT("GodfreyVoiceInput: holding transcript while visitor still speaking: %s"), *Transcript);
+		return;
+	}
+
+	ScheduleVisitorTurnCommit();
 }
 
 void UGodfreyVoiceInputComponent::QueueOrSendVisitorTranscript(const FString& Transcript, const bool bIsFarewell)
@@ -1121,6 +1320,96 @@ void UGodfreyVoiceInputComponent::TrySendPendingFarewellTranscript()
 	UE_LOG(LogGodfreyVoiceInput, Log,
 		TEXT("GodfreyVoiceInput: sending queued farewell transcript: %s"), *Text);
 	QueueOrSendVisitorTranscript(Text, true);
+}
+
+bool UGodfreyVoiceInputComponent::ShouldIgnoreIncomingStt() const
+{
+	return bMicPaused || IsInPostSpeechIgnore();
+}
+
+void UGodfreyVoiceInputComponent::ResetVisitorTurnAfterMicClosed()
+{
+	bSpeechActive = false;
+	PendingVisitorTranscript.Reset();
+	ClearVisitorTurnCommitTimer();
+	ClearAwaitingFinalTranscript();
+}
+
+void UGodfreyVoiceInputComponent::AbsorbVisitorTranscript(const FString& Transcript)
+{
+	PendingVisitorTranscript = GodfreyVoiceInputPrivate::MergeVisitorTranscripts(
+		PendingVisitorTranscript,
+		Transcript);
+}
+
+void UGodfreyVoiceInputComponent::ClearVisitorTurnCommitTimer()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(VisitorTurnCommitTimerHandle);
+	}
+}
+
+void UGodfreyVoiceInputComponent::ScheduleVisitorTurnCommit()
+{
+	if (PendingVisitorTranscript.IsEmpty() || bSpeechActive)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	ClearVisitorTurnCommitTimer();
+	const float Delay = FMath::Max(0.0f, VisitorTurnCommitDelaySeconds);
+	if (Delay <= KINDA_SMALL_NUMBER)
+	{
+		CommitPendingVisitorTranscript();
+		return;
+	}
+
+	TWeakObjectPtr<UGodfreyVoiceInputComponent> WeakThis(this);
+	World->GetTimerManager().SetTimer(
+		VisitorTurnCommitTimerHandle,
+		FTimerDelegate::CreateLambda([WeakThis]()
+		{
+			if (UGodfreyVoiceInputComponent* Self = WeakThis.Get())
+			{
+				Self->CommitPendingVisitorTranscript();
+			}
+		}),
+		Delay,
+		false);
+	UE_LOG(LogGodfreyVoiceInput, Log,
+		TEXT("GodfreyVoiceInput: commit delay %.2fs (lantern stays Speak) pending='%s'"),
+		Delay,
+		*PendingVisitorTranscript);
+}
+
+void UGodfreyVoiceInputComponent::CommitPendingVisitorTranscript()
+{
+	ClearVisitorTurnCommitTimer();
+	if (PendingVisitorTranscript.IsEmpty())
+	{
+		return;
+	}
+	if (bSpeechActive || ShouldIgnoreIncomingStt())
+	{
+		UE_LOG(LogGodfreyVoiceInput, Log,
+			TEXT("GodfreyVoiceInput: deferred commit — visitor still speaking or mic closed."));
+		return;
+	}
+
+	const FString Transcript = PendingVisitorTranscript;
+	PendingVisitorTranscript.Reset();
+	ClearAwaitingFinalTranscript();
+	const bool bFarewell = GodfreyVoiceInputPrivate::LooksLikeVisitorFarewell(Transcript);
+	UE_LOG(LogGodfreyVoiceInput, Log,
+		TEXT("GodfreyVoiceInput: visitor turn complete — lantern Wait, AskGodfrey."));
+	QueueOrSendVisitorTranscript(Transcript, bFarewell);
 }
 
 void UGodfreyVoiceInputComponent::ScheduleReconnect()

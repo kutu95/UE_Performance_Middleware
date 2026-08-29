@@ -1,12 +1,14 @@
-"""Editor-only: ensure Godfrey_World places the migrated BP_Godfrey_Performer (MHC Errol shell).
+"""Replace the placed Godfrey_World performer with a fresh BP_Godfrey_Performer.
 
-World Partition rule: do NOT run this via UnrealEditor-Cmd headless spawn/destroy.
-Open Godfrey_World, load exhibit cells, then:
+That is the MetaHuman swap: destroy the old World Partition instance (it still
+carries Hair_S_Clean / blonde Beard_L_Messy overrides) and spawn a new actor
+from the migrated Blueprint CDO (MH_RealityErrol body/face/grooms + ACE stack).
+
+EDITOR ONLY — never UnrealEditor-Cmd. Headless spawn/destroy splits WP cells.
+
+Open Godfrey_World, stop PIE, load exhibit cells, then:
   Tools → Execute Python Script → this file
-
-If the level actor is already BP_Godfrey_Performer (same soft path after asset replace),
-this only re-applies the GodfreyCharacter tag and logs mesh/component sanity.
-If a stale Kristofer/Bridge instance remains under another label, replace it in-editor.
+  Ctrl+S the level
 """
 from __future__ import annotations
 
@@ -21,10 +23,13 @@ import unreal
 
 import importlib
 import godfrey_blueprint_wiring as wiring  # noqa: E402
+import godfrey_exhibit_guard  # noqa: E402
 
 importlib.reload(wiring)
 
 REPORT = "SwapGodfreyWorldMhcPerformer.txt"
+LEVEL_PATH = "/Game/Godfrey_World"
+PERFORMER_LABEL = "BP_Godfrey_Performer"
 _lines: list[str] = []
 
 
@@ -50,123 +55,223 @@ def _actor_class_path(actor) -> str:
         return str(actor.get_class())
 
 
-def main() -> None:
-    bp = unreal.load_asset(wiring.GODFREY_PERFORMER_BP)
-    if not bp:
-        raise RuntimeError(
-            f"Missing {wiring.GODFREY_PERFORMER_BP} — run migrate_errol_to_godfrey_performer.py first"
-        )
-
-    # Confirm MHC Errol shell (Body/Face present; meshes should be SKM_MHC_Errol_* after migrate).
-    body, _ = wiring.find_component(bp, "Body")
-    face, _ = wiring.find_component(bp, "Face")
-    if not body or not face:
-        raise RuntimeError("Migrated performer missing Body/Face")
-
+def _groom_summary(actor) -> str:
+    parts = []
     try:
-        body_mesh = body.get_editor_property("SkeletalMesh")
-        face_mesh = face.get_editor_property("SkeletalMesh")
-        body_path = body_mesh.get_path_name() if body_mesh else "(none)"
-        face_path = face_mesh.get_path_name() if face_mesh else "(none)"
-        log(f"Body mesh: {body_path}")
-        log(f"Face mesh: {face_path}")
-        if "CaptainGodfrey" in body_path or "CaptainGodfrey" in face_path:
-            log("WARN: performer still references CaptainGodfrey meshes — re-run Errol migrate after Assemble")
-        elif "MHC_Errol" not in body_path and "Errol" not in body_path:
-            log(f"WARN: unexpected body mesh path (expected SKM_MHC_Errol_*): {body_path}")
-    except Exception as exc:
-        log(f"WARN: could not read Body/Face mesh soft paths: {exc}")
+        grooms = list(actor.get_components_by_class(unreal.GroomComponent) or [])
+    except Exception:
+        grooms = []
+    for comp in grooms:
+        name = str(comp.get_name())
+        asset = None
+        try:
+            asset = comp.get_editor_property("groom_asset")
+        except Exception:
+            pass
+        path = asset.get_path_name() if asset else "(none)"
+        parts.append(f"{name}={path}")
+    return "; ".join(parts) if parts else "(no grooms)"
 
-    ace, _ = wiring.find_component_by_class(bp, "ACEAudioCurveSourceComponent")
-    if not ace:
-        raise RuntimeError("Migrated performer missing ACEAudioCurveSource — re-run migrate script")
 
-    log(f"Asset OK: {wiring.GODFREY_PERFORMER_BP}")
-    log(f"Body AnimClass: {wiring._anim_class_name(body)}")
-    log(f"Face AnimClass: {wiring._anim_class_name(face)}")
-
-    eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    if not eas:
-        raise RuntimeError("EditorActorSubsystem unavailable — open Godfrey_World in the editor")
-
-    performers = []
-    for actor in eas.get_all_level_actors():
-        if not actor:
-            continue
+def _is_performer(actor) -> bool:
+    if not actor:
+        return False
+    try:
         label = actor.get_actor_label()
         name = actor.get_name()
-        cls_path = _actor_class_path(actor)
-        is_performer = (
-            label == "BP_Godfrey_Performer"
-            or "BP_Godfrey_Performer" in name
-            or "BP_MHC_Errol" in label
-            or "BP_MHC_CaptainGodfrey" in label
-            or "BP_Kristofer" in label
-            or wiring.GODFREY_CHARACTER_TAG in list(actor.tags)
-        )
-        if not is_performer:
-            # Also match by ACE component on placed actors.
-            try:
-                if actor.get_component_by_class(
-                    unreal.load_class(None, wiring.ACE_CURVE_SOURCE_CLASS)
-                ):
-                    is_performer = True
-            except Exception:
-                pass
-        if is_performer:
-            performers.append(actor)
-            log(f"Found candidate: label={label} name={name} class={cls_path} loc={actor.get_actor_location()}")
+        tags = list(actor.tags)
+    except Exception:
+        return False
+    if (
+        label == PERFORMER_LABEL
+        or PERFORMER_LABEL in name
+        or "BP_MHC_Errol" in label
+        or "BP_MH_RealityErrol" in label
+        or "BP_MHC_CaptainGodfrey" in label
+        or "BP_Kristofer" in label
+        or wiring.GODFREY_CHARACTER_TAG in tags
+    ):
+        return True
+    try:
+        ace_cls = unreal.load_class(None, wiring.ACE_CURVE_SOURCE_CLASS)
+        if ace_cls and actor.get_component_by_class(ace_cls):
+            return True
+    except Exception:
+        pass
+    return False
 
+
+def find_performers() -> list:
+    eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    found = []
+    for actor in eas.get_all_level_actors() or []:
+        if _is_performer(actor):
+            found.append(actor)
+            log(
+                f"Found: label={actor.get_actor_label()} name={actor.get_name()} "
+                f"class={_actor_class_path(actor)} loc={actor.get_actor_location()} "
+                f"grooms={_groom_summary(actor)}"
+            )
+    return found
+
+
+def capture_transform(actor):
+    loc = actor.get_actor_location()
+    rot = actor.get_actor_rotation()
+    scale = actor.get_actor_scale3d()
+    folder = None
+    try:
+        folder = actor.get_folder_path()
+    except Exception:
+        folder = None
+    return loc, rot, scale, folder
+
+
+def replace_with_fresh_instance(bp) -> object:
+    eas = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    performers = find_performers()
     if not performers:
         raise RuntimeError(
-            "No performer actor loaded in the current world. "
-            "Open Godfrey_World, load the exhibit region (wp.Editor.LoadAllCells or fly there), "
-            "then re-run this script. Or place BP_Godfrey_Performer manually and tag GodfreyCharacter."
+            "No performer actor loaded. Open Godfrey_World, run wp.Editor.LoadAllCells, "
+            "fly to the exhibit dock, then re-run this script."
         )
 
-    # Prefer exact BP_Godfrey_Performer label.
     primary = None
     for actor in performers:
-        if actor.get_actor_label() == "BP_Godfrey_Performer":
+        if actor.get_actor_label() == PERFORMER_LABEL:
             primary = actor
             break
     if primary is None:
         primary = performers[0]
-        log(f"WARN: using first candidate label={primary.get_actor_label()} (expected BP_Godfrey_Performer)")
+        log(f"WARN: replacing {primary.get_actor_label()} (expected {PERFORMER_LABEL})")
 
-    tags = list(primary.tags)
+    loc, rot, scale, folder = capture_transform(primary)
+    log(f"Keep transform loc={loc} rot={rot} scale={scale} folder={folder}")
+
+    generated = bp.generated_class() if hasattr(bp, "generated_class") else None
+    if not generated:
+        raise RuntimeError(f"No generated class for {wiring.GODFREY_PERFORMER_BP}")
+
+    for actor in performers:
+        label = actor.get_actor_label()
+        eas.destroy_actor(actor)
+        log(f"Destroyed stale instance {label}")
+
+    actor = eas.spawn_actor_from_class(generated, loc, rot)
+    if not actor:
+        raise RuntimeError("spawn_actor_from_class failed")
+
+    actor.set_actor_label(PERFORMER_LABEL)
+    actor.set_actor_scale3d(scale)
+    actor.set_actor_hidden_in_game(False)
+    if folder:
+        try:
+            actor.set_folder_path(folder)
+        except Exception:
+            pass
+    tags = list(actor.tags)
     if wiring.GODFREY_CHARACTER_TAG not in tags:
         tags.append(wiring.GODFREY_CHARACTER_TAG)
-        primary.tags = tags
-        log(f"Applied tag {wiring.GODFREY_CHARACTER_TAG}")
-    else:
-        log(f"Tag {wiring.GODFREY_CHARACTER_TAG} already present")
+        actor.tags = tags
+    log(f"Spawned fresh {PERFORMER_LABEL} class={_actor_class_path(actor)}")
+    log(f"New grooms: {_groom_summary(actor)}")
+    return actor
 
-    # Soft-path class check: after asset replace, placed actor should resolve to new MHC BP.
-    cls_path = _actor_class_path(primary)
-    if (
-        "BP_Godfrey_Performer" not in cls_path
-        and "BP_MHC_Errol" not in cls_path
-        and "BP_MHC_CaptainGodfrey" not in cls_path
-    ):
-        log(
-            f"WARN: actor class path looks unexpected: {cls_path}. "
-            "Delete the old actor and place /Game/MetaHumans/Godfrey/BP_Godfrey_Performer at the same transform."
+
+def assert_fresh_look(actor) -> None:
+    summary = _groom_summary(actor)
+    banned = ("Hair_S_Clean", "Beard_L_Messy", "Mustache_L_Handlebar")
+    hits = [token for token in banned if token in summary]
+    if hits:
+        raise RuntimeError(
+            f"Fresh actor still has old grooms ({hits}): {summary}. "
+            "Blueprint CDO is stale — re-run migrate_reality_errol_to_godfrey_performer.py first."
         )
-    else:
-        log(f"Actor class path OK: {cls_path}")
+        if "Hair_S_Casual" not in summary:
+            log(f"WARN: expected Hair_S_Casual on fresh actor, got: {summary}")
+    body = None
+    try:
+        for mesh in actor.get_components_by_class(unreal.SkeletalMeshComponent) or []:
+            if str(mesh.get_name()) == "Body":
+                body = mesh
+                break
+    except Exception:
+        body = None
+    if body:
+        try:
+            skm = body.get_skeletal_mesh_asset()
+            path = skm.get_path_name() if skm else "(none)"
+        except Exception:
+            path = "(none)"
+        log(f"Fresh Body mesh: {path}")
+        if "SKM_MH_RealityErrol_BodyMesh" not in path:
+            raise RuntimeError(f"Fresh actor body is not RealityErrol: {path}")
 
-    # Save the actor package if dirty (editor session).
+
+def save_level() -> None:
+    try:
+        les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+        les.save_current_level()
+        log("LevelEditorSubsystem.save_current_level")
+    except Exception as exc:
+        log(f"save_current_level: {exc}")
+    try:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+        unreal.EditorLoadingAndSavingUtils.save_map(world, LEVEL_PATH)
+        log(f"save_map {LEVEL_PATH}")
+    except Exception as exc:
+        log(f"save_map: {exc}")
     try:
         unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
         log("Saved dirty packages")
     except Exception as exc:
-        log(f"WARN: save_dirty_packages: {exc}")
+        log(f"save_dirty_packages: {exc}")
+
+
+def main() -> None:
+    godfrey_exhibit_guard.reject_headless_spawn()
+
+    bp = unreal.load_asset(wiring.GODFREY_PERFORMER_BP)
+    if not bp:
+        raise RuntimeError(
+            f"Missing {wiring.GODFREY_PERFORMER_BP} — run migrate_reality_errol_to_godfrey_performer.py first"
+        )
+
+    body, _ = wiring.find_component(bp, "Body")
+    face, _ = wiring.find_component(bp, "Face")
+    if not body or not face:
+        raise RuntimeError("Migrated performer missing Body/Face")
+    ace, _ = wiring.find_component_by_class(bp, "ACEAudioCurveSourceComponent")
+    if not ace:
+        raise RuntimeError("Migrated performer missing ACEAudioCurveSource — re-run migrate script")
+
+    try:
+        body_mesh = body.get_skeletal_mesh_asset()
+        body_path = body_mesh.get_path_name() if body_mesh else "(none)"
+    except Exception:
+        body_path = "(none)"
+    log(f"Blueprint Body: {body_path}")
+    if "SKM_MH_RealityErrol_BodyMesh" not in body_path:
+        raise RuntimeError(
+            f"Blueprint is not RealityErrol yet ({body_path}). "
+            "Run migrate_reality_errol_to_godfrey_performer.py first."
+        )
+
+    world = unreal.EditorLevelLibrary.get_editor_world()
+    if world:
+        unreal.SystemLibrary.execute_console_command(world, "wp.Editor.LoadAllCells")
+        log("wp.Editor.LoadAllCells")
+
+    godfrey_exhibit_guard.require_loaded((PERFORMER_LABEL,))
+
+    actor = replace_with_fresh_instance(bp)
+    assert_fresh_look(actor)
+    save_level()
 
     write_report(True)
     log(
-        "PASS — level performer tagged. PIE: queue TTS from Brain; expect audible + lip sync "
-        "([ACE sync] First curve weights applied). Cloth should stay stable (MHC outfits)."
+        "PASS — old placed MetaHuman destroyed; fresh BP_Godfrey_Performer spawned "
+        "at the same dock transform. Ctrl+S if prompted, then PIE."
     )
 
 

@@ -30,6 +30,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Direct Speech")
 	bool AskGodfrey(const FString& PromptText);
 
+	/** Cancel HTTP + ACE for the current AskGodfrey (R10 barge-in). Safe if idle. */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Direct Speech")
+	void AbortCurrentStream(const FString& Reason);
+
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Direct Speech")
 	bool IsStreaming() const { return bIsStreaming; }
 

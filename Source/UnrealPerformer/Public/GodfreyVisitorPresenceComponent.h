@@ -30,7 +30,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
  * - Frame-to-frame motion gate so a moved chair / light patch cannot Welcome
  * - Empty baseline rebase: leave recapture, stillness, periodic refresh
  * - Dwell timers → Empty / Approaching / Present / Leaving
- * - Optional presence-gated Welcome engage (R17) while SeaIdle
+ * - Presence-gated arrival card + Welcome (R17); mic must not skip this
  * - Bottom-left debug webcam preview (F9); F10 force occupied; F11 recapture empty
  *
  * Occupancy is appearance+motion, not a person detector.
@@ -70,6 +70,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Presence")
 	void SetForceOccupied(bool bForce);
 
+	/**
+	 * R10 unanswered-engage leave: occupancy may still look Present. Block Welcome until
+	 * SeaIdle + a fresh empty baseline so SeaIdle does not immediately greet a ghost blob.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Presence")
+	void NotifyEncounterAbandonedWhileOccupied();
+
+	/**
+	 * True while webcam presence owns the first turn: Welcome not yet delivered this occupancy
+	 * (Empty, Approaching, Present during the arrival card). STT must not AskGodfrey.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Vision|Presence")
+	bool ShouldDeferVisitorSpeechForPresenceWelcome() const;
+
 	UPROPERTY(BlueprintAssignable, Category = "Godfrey|Vision|Presence")
 	FGodfreyVisitorSenseChangedEvent OnVisitorSenseChanged;
 
@@ -77,7 +91,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision")
 	bool bEnableWebcam = true;
 
-	/** Drive Godfrey Welcome engage when Present while SeaIdle (R17). */
+	/** Drive Godfrey arrival card + Welcome when Present (R17). Mic activity must not skip this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence")
 	bool bEngageOnPresence = true;
 
@@ -187,6 +201,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.0", ClampMax = "5.0"))
 	float LeaveRecaptureDelaySeconds = 0.75f;
 
+	/**
+	 * After R10 unanswered leave, wait this long in SeaIdle then recapture empty
+	 * (ghost occupancy was treating the vacant room as Present).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.5", ClampMax = "8.0"))
+	float AbandonedEmptyRecaptureDelaySeconds = 2.f;
+
 	/** While Empty and unoccupied, recapture empty on this interval (daylight). 0 = off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.0", ClampMax = "900.0"))
 	float PeriodicEmptyRefreshSeconds = 180.f;
@@ -259,9 +280,14 @@ private:
 	void UpdateSenseState(float DeltaTime);
 	void BeginEmptyBackgroundCapture(const TCHAR* Reason, bool bResetSenseToEmpty);
 	void TickEmptyBaselineMaintenance(float DeltaTime);
+	void TickAbandonedEmptyRecapture(float DeltaTime);
 	float GetEmptyBackgroundAgeSeconds() const;
 	void SetSenseState(EGodfreyVisitorSenseState NewState);
 	void TryPresenceEngage();
+	void CompletePresenceEngage();
+	UFUNCTION()
+	void HandleVisitorBriefingFinished();
+	class UGodfreyVisitorBriefingComponent* ResolveVisitorBriefing();
 	void RequestWelcomeSpeak();
 	UFUNCTION()
 	void HandleWelcomeSpeakTimer();
@@ -299,6 +325,8 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UGodfreyPerformerAnimationBridgeComponent> AnimationBridge;
 
+	bool bBriefingFinishedBound = false;
+
 	EGodfreyVisitorSenseState VisitorSenseState = EGodfreyVisitorSenseState::Empty;
 	int32 EstimatedVisitorCount = 0;
 	bool bRawOccupied = false;
@@ -312,6 +340,9 @@ private:
 	bool bCapturingEmptyBackground = false;
 	bool bPresenceFarewellRequested = false;
 	bool bPendingFarewellSpeak = false;
+	bool bBlockPresenceWelcomeUntilVacated = false;
+	bool bPresenceWelcomeDeliveredThisVisit = false;
+	bool bPendingAbandonedEmptyRecapture = false;
 	int32 WebcamPlayRetryCount = 0;
 	int32 EmptyBackgroundFramesCaptured = 0;
 	float WebcamPlayRetryCountdown = 0.f;
@@ -324,6 +355,7 @@ private:
 	FTimerHandle FarewellSpeakTimerHandle;
 	float EnterDwellRemaining = -1.f;
 	float LeaveDwellRemaining = -1.f;
+	float AbandonedEmptyRecaptureCountdown = -1.f;
 	float ActivityRefreshCountdown = 0.f;
 	float OccupancyFraction = 0.f;
 	float MotionFraction = 0.f;

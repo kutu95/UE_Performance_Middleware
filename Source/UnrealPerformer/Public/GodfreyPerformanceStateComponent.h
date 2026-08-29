@@ -5,6 +5,8 @@
 #include "GodfreyPerformanceTypes.h"
 #include "GodfreyPerformanceStateComponent.generated.h"
 
+class UGodfreyDirectSpeechComponent;
+
 /**
  * Godfrey Performer v1 — Blueprint-facing behaviour event bus for exhibition characters.
  *
@@ -151,7 +153,7 @@ public:
 
 	/**
 	 * Visitor STT speech_started — ends the R10 silent-period timer immediately
-	 * (do not wait for transcript_completed).
+	 * (do not wait for transcript_completed) and aborts an in-flight quiet nudge.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Presence")
 	void NotifyVisitorSpeechBegan();
@@ -184,6 +186,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Performer|Presence")
 	bool HasEngagedVisitor() const { return bHasEngagedVisitor; }
+
+	/** True from a successful R10 AskGodfrey until that nudge ends or is aborted. */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Performer|Presence")
+	bool IsDialogEngagePromptInFlight() const { return bDialogEngagePromptInFlight; }
 
 	/**
 	 * In-dialog: visitor has spoken (engage started) and farewell has not begun.
@@ -224,18 +230,25 @@ public:
 	 * (no visitor and no Godfrey speech), UE asks Godfrey to continue (R10).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Presence", meta = (ClampMin = "1.0", ClampMax = "30.0"))
-	float DialogEngageSilenceSeconds = 8.0f;
+	float DialogEngageSilenceSeconds = 16.0f;
 
 	/** UE-owned conversational nudge while Present + in dialog (R10). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Presence")
 	bool bEnableDialogEngagementPrompts = true;
 
 	/**
-	 * Prompt for the silence nudge. Brain continues from session history; ask for name when unknown.
+	 * After this many unanswered R10 nudges, assume the visitor has left and return to SeaIdle
+	 * (waiting for the next visitor). 0 = never leave on unanswered nudges (60s idle timeout still applies).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Presence", meta = (ClampMin = "0", ClampMax = "8", EditCondition = "bEnableDialogEngagementPrompts"))
+	int32 DialogEngageMaxUnansweredAttempts = 2;
+
+	/**
+	 * Prompt for the silence nudge. Brain continues from session history; do not re-ask a known name.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Presence", meta = (MultiLine = "true", EditCondition = "bEnableDialogEngagementPrompts"))
 	FString DialogEngagePrompt = TEXT(
-		"(The visitor has been quiet for a few seconds. Continue the conversation naturally in one or two short sentences that follow from what was just said. If you do not yet know their name, ask for it. Otherwise ask a brief follow-up or offer a short remark. Stay in character. Do not say goodbye.)");
+		"(The visitor has been quiet for a few seconds. Continue the conversation naturally in one or two short sentences that follow from what was just said. Do not ask their name if you already have it or have already asked. Do not greet them as a new arrival. Stay in character. Do not say goodbye.)");
 
 	/**
 	 * Safety net for a latched conversation end: if no speech is playing for this long after the request
@@ -320,6 +333,11 @@ private:
 	void TickDialogEngagement(float DeltaTime);
 	void MarkDialogExchange();
 	bool TryFireDialogEngagementPrompt();
+	void ResetUnansweredDialogEngages();
+	void NotifyPresenceEncounterAbandoned();
+	void AssumeVisitorLeftAfterUnansweredEngages();
+	void AbortDialogEngagePromptIfInFlight(const TCHAR* Reason);
+	UGodfreyDirectSpeechComponent* FindDirectSpeech() const;
 	bool IsVisitorVisiblyPresent() const;
 	bool IsVisitorListenWindowOpen() const;
 	bool IsGodfreyBusyForDialogEngage() const;
@@ -345,6 +363,12 @@ private:
 
 	/** Last visitor STT turn or Godfrey audible end — drives R10 conversational nudge. */
 	double LastDialogExchangeWorldTime = -1.0;
+
+	/** R10 nudges fired since the visitor last spoke. */
+	int32 DialogEngageUnansweredCount = 0;
+
+	/** R10 AskGodfrey is in flight (Thinking / streaming / speaking the nudge). */
+	bool bDialogEngagePromptInFlight = false;
 
 	/** True while Brain has accepted a question and has not yet queued TTS (exhibition awaiting_reply). */
 	UPROPERTY(Transient)

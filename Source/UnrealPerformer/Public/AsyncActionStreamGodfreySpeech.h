@@ -157,6 +157,12 @@ private:
 
 	UFUNCTION()
 
+	void HandleSessionIngestStallWhileAudioCaughtUp();
+
+
+
+	UFUNCTION()
+
 	void HandleSessionError(const FString& ErrorMessage);
 
 
@@ -266,6 +272,9 @@ private:
 	bool bDidFinish = false;
 
 	bool bHttpCompleteAwaitingFinish = false;
+
+	/** Hung Brain/TTS: abandon the HTTP receive and FinishStream with the PCM we already have. */
+	bool bForcedFinishFromIngestStall = false;
 
 	/** True while waiting on a paced/catch-up timer before next drain (avoids busy-loop AsyncTask). */
 	bool bHttpBodyDrainCatchUpDeferred = false;

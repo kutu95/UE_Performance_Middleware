@@ -94,9 +94,9 @@ public:
 	bool ShouldDeferEndAudioSamplesForCurveCatchUp() const;
 
 	/**
-	 * After HTTP drain, only force EndAudioSamples when catch-up has stalled near the audible end
-	 * (or an absolute safety deadline). Never force mid-speech with tens of seconds unmatched —
-	 * that blocks the game thread for seconds (animation/lipsync freeze on long occasion speeches).
+	 * After HTTP drain, force EndAudioSamples once audible playback has caught sent PCM
+	 * (any length), or near the end of a long occasion, or at the 120s stall deadline.
+	 * Never force mid-speech with tens of seconds unmatched — that blocks the game thread.
 	 */
 	bool ShouldForceEndAudioSamplesDespiteCatchUpLag(float CatchUpElapsedSeconds) const;
 
@@ -120,6 +120,14 @@ public:
 	/** Fires when ACE audible playback completes (UACEAudioCurveSourceComponent::OnAnimationEnded), not when HTTP ingest finishes. */
 	UPROPERTY(BlueprintAssignable, Category = "Audio|Godfrey|Streaming")
 	FGodfreyStreamSimpleEvent OnPlaybackEnded;
+
+	/**
+	 * HTTP is still open (FinishStream not called) but playback has exhausted the PCM we have
+	 * and ingest has been quiet for GodfreyAceIngestStallTimeoutSeconds. The async action
+	 * should cancel the hung request and FinishStream so lips/body can rest.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Audio|Godfrey|Streaming")
+	FGodfreyStreamSimpleEvent OnIngestStallWhileAudioCaughtUp;
 
 	UPROPERTY(BlueprintAssignable, Category = "Audio|Godfrey|Streaming")
 	FGodfreyStreamSimpleEvent OnFinished;
@@ -183,6 +191,19 @@ private:
 	 */
 	bool TryCompleteAcePlaybackFromAudioEndWatchdog();
 
+	/**
+	 * While HTTP is still open: if playback has exhausted sent PCM and ingest has been quiet
+	 * long enough, broadcast OnIngestStallWhileAudioCaughtUp once so the async action can FinishStream.
+	 */
+	void TryBroadcastIngestStallIfPlaybackExhausted(
+		double Now,
+		float Wall,
+		float EffectiveWall,
+		double ExpectedFromSamples,
+		bool bProceduralPlaying,
+		float MaxTs,
+		bool bMaxTsStable);
+
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> TargetCharacter;
 
@@ -208,6 +229,7 @@ private:
 	int32 LastVoiceRmsFloorUsed = 0;
 	bool bLoggedAceFaceParamsThisUtterance = false;
 	bool bLoggedAceRestPoseThisUtterance = false;
+	bool bBroadcastIngestStallThisUtterance = false;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UAudio2FaceParameters> AceFaceParameters;

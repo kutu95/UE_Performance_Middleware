@@ -3,6 +3,7 @@
 #include "Animation/AnimData/BoneMaskFilter.h"
 #include "Animation/AnimSequence.h"
 #include "GodfreyPerformanceLog.h"
+#include "UnrealPerformerGodfreySettings.h"
 
 const FName UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName(TEXT("DefaultSlot"));
 const FName UGodfreyBodyAnimInstance::UpperBodyMontageSlotName(TEXT("UpperBody"));
@@ -14,8 +15,8 @@ namespace
 const TCHAR* GGodfreyNeutralStancePaths[] = {
 	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_IdleStanding_01_EyeFixed.AS_IdleStanding_01_EyeFixed"),
 	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_IdleStanding_01.AS_IdleStanding_01"),
-	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_HandsClasped_01_EyeFixed.AS_HandsClasped_01_EyeFixed"),
-	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_HandsClasped_01.AS_HandsClasped_01"),
+	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_IdleWeightShift_01_EyeFixed.AS_IdleWeightShift_01_EyeFixed"),
+	TEXT("/Game/Godfrey/Animation/Animation/Performances/AS_IdleWeightShift_01.AS_IdleWeightShift_01"),
 };
 } // namespace
 
@@ -64,6 +65,20 @@ void FGodfreyBodyAnimInstanceProxy::Update(float DeltaSeconds)
 		NeckLookAtNode.LookAtLocation = BodyInst->GetHeadAimWorldTarget();
 		NeckLookAtNode.LookAtClamp = BodyInst->GetHeadAimClampDegrees();
 		NeckLookAtNode.Alpha = BodyInst->GetHeadAimAlpha();
+
+		if (const UUnrealPerformerGodfreySettings* const Settings = GetDefault<UUnrealPerformerGodfreySettings>())
+		{
+			CoatClearanceNode.bEnabled = Settings->bGodfreyCoatClearance;
+			CoatClearanceNode.Alpha = Settings->bGodfreyCoatClearance ? Settings->GodfreyCoatClearanceAlpha : 0.f;
+			CoatClearanceNode.MinHandLateralCm = Settings->GodfreyCoatClearanceMinHandLateralCm;
+			CoatClearanceNode.MinElbowLateralCm = Settings->GodfreyCoatClearanceMinElbowLateralCm;
+			CoatClearanceNode.ForwardStartCm = Settings->GodfreyCoatClearanceForwardStartCm;
+			CoatClearanceNode.MinHemForwardCm = Settings->GodfreyCoatClearanceMinHemForwardCm;
+			CoatClearanceNode.TorsoMinHeightCm = Settings->GodfreyCoatClearanceTorsoMinHeightCm;
+			CoatClearanceNode.TorsoMaxHeightCm = Settings->GodfreyCoatClearanceTorsoMaxHeightCm;
+			CoatClearanceNode.MaxPushCm = Settings->GodfreyCoatClearanceMaxPushCm;
+			CoatClearanceNode.InterpSpeed = Settings->GodfreyCoatClearanceInterpSpeed;
+		}
 	}
 
 	FAnimInstanceProxy::Update(DeltaSeconds);
@@ -82,6 +97,7 @@ void FGodfreyBodyAnimInstanceProxy::GetCustomNodes(TArray<FAnimNode_Base*>& OutN
 	OutNodes.Add(&LayeredBlendNode);
 	OutNodes.Add(&LocalToCSNode);
 	OutNodes.Add(&NeckLookAtNode);
+	OutNodes.Add(&CoatClearanceNode);
 	OutNodes.Add(&CSToLocalNode);
 	OutNodes.Add(&RootNode);
 }
@@ -127,7 +143,11 @@ void FGodfreyBodyAnimInstanceProxy::ConstructNodes()
 	NeckLookAtNode.Alpha = 0.f;
 	NeckLookAtNode.bAlphaBoolEnabled = true;
 
-	CSToLocalNode.ComponentPose.SetLinkNode(&NeckLookAtNode);
+	CoatClearanceNode.ComponentPose.SetLinkNode(&NeckLookAtNode);
+	CoatClearanceNode.Alpha = 1.f;
+	CoatClearanceNode.bAlphaBoolEnabled = true;
+
+	CSToLocalNode.ComponentPose.SetLinkNode(&CoatClearanceNode);
 	RootNode.Result.SetLinkNode(&CSToLocalNode);
 }
 

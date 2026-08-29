@@ -40,13 +40,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Voice Input")
 	void SetMicPaused(bool bPaused);
 
+	/** Arrival briefing overlay holds the mic regardless of Godfrey speaking. */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Voice Input")
+	void SetBriefingHold(bool bHold);
+
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Voice Input")
+	bool IsBriefingHold() const { return bBriefingHold; }
+
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Voice Input")
 	bool IsListening() const { return bListening; }
 
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Voice Input")
 	bool IsMicPaused() const { return bMicPaused; }
 
-	/** True when a visitor utterance would be accepted (mic live, Godfrey not speaking, past post-speech ignore). */
+	/** True when the lantern should show Speak: mic live, Godfrey not speaking, past post-speech ignore. Stays true while the visitor is still talking or a just-ended turn has not been committed yet. */
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Voice Input")
 	bool CanVisitorSpeak() const;
 
@@ -102,6 +109,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input", meta = (ClampMin = "0.5", ClampMax = "8.0", EditCondition = "bEnableMissedTranscriptPrompt"))
 	float MissedTranscriptTimeoutSeconds = 2.0f;
 
+	/**
+	 * After VAD speech_stopped, wait this long before AskGodfrey so a mid-sentence pause that
+	 * immediately continues does not turn the lantern Wait / steal the turn.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float VisitorTurnCommitDelaySeconds = 0.5f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input")
 	bool bEnableMissedTranscriptPrompt = true;
 
@@ -155,6 +169,12 @@ private:
 	void ScheduleMissedTranscriptWatch();
 	void HandleTranscriptMissed(const FString& Reason);
 	bool TryFireMissedTranscriptPrompt(const FString& Reason);
+	bool ShouldIgnoreIncomingStt() const;
+	void ResetVisitorTurnAfterMicClosed();
+	void AbsorbVisitorTranscript(const FString& Transcript);
+	void ScheduleVisitorTurnCommit();
+	void CommitPendingVisitorTranscript();
+	void ClearVisitorTurnCommitTimer();
 	void ScheduleReconnect();
 	void OnCaptureAudio(const float* InAudio, int32 NumFrames, int32 NumChannels, int32 SampleRate);
 	void AppendResampledPcm16(const float* InAudio, int32 NumFrames, int32 NumChannels, int32 InSampleRate);
@@ -168,6 +188,7 @@ private:
 
 	bool bListening = false;
 	bool bMicPaused = false;
+	bool bBriefingHold = false;
 	bool bServerReady = false;
 	bool bSpeechActive = false;
 	bool bAwaitingFinalTranscript = false;
@@ -175,11 +196,14 @@ private:
 	bool bWantListening = false;
 	bool bWasGodfreySpeaking = false;
 	bool bWasCanVisitorSpeak = false;
+	bool bHadSpeechStartedSinceUnpause = false;
 	double PostSpeechIgnoreUntilWorldTime = -1.0;
 	FString PendingFarewellTranscript;
+	FString PendingVisitorTranscript;
 
 	FTimerHandle ReconnectTimerHandle;
 	FTimerHandle MissedTranscriptTimerHandle;
+	FTimerHandle VisitorTurnCommitTimerHandle;
 
 	/** Opaque Audio::FAudioCapture held without exposing AudioCaptureCore in the header. */
 	struct FGodfreyAudioCaptureState* CaptureState = nullptr;

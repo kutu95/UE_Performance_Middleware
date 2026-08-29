@@ -10,6 +10,7 @@
 #include "GodfreyRuntimePerfHudComponent.h"
 #include "GodfreyListenCueComponent.h"
 #include "GodfreyVisitorPresenceComponent.h"
+#include "GodfreyVisitorBriefingComponent.h"
 #include "GodfreyVoiceInputComponent.h"
 #include "GodfreyStageBackdropVideoComponent.h"
 #include "UnrealPerformerGodfreySettings.h"
@@ -74,6 +75,16 @@ void UGodfreyExhibitionQueuePollComponent::BeginPlay()
 					NewObject<UGodfreyVisitorPresenceComponent>(Owner, TEXT("GodfreyVisitorPresence"));
 				Presence->RegisterComponent();
 				UE_LOG(LogGodfreyExhibitionQueue, Log, TEXT("Spawned GodfreyVisitorPresenceComponent (webcam)."));
+			}
+			if (!Owner->FindComponentByClass<UGodfreyVisitorBriefingComponent>())
+			{
+				if (!Settings || Settings->bGodfreyEnableVisitorBriefing)
+				{
+					UGodfreyVisitorBriefingComponent* Briefing =
+						NewObject<UGodfreyVisitorBriefingComponent>(Owner, TEXT("GodfreyVisitorBriefing"));
+					Briefing->RegisterComponent();
+					UE_LOG(LogGodfreyExhibitionQueue, Log, TEXT("Spawned GodfreyVisitorBriefingComponent (arrival card)."));
+				}
 			}
 		}
 	}
@@ -473,6 +484,7 @@ void UGodfreyExhibitionQueuePollComponent::ClearActiveStream()
 		ActiveStreamAction = nullptr;
 	}
 	bStreamInProgress = false;
+	bQueuedSpeechPlaying = false;
 }
 
 void UGodfreyExhibitionQueuePollComponent::PollOnce()
@@ -531,11 +543,13 @@ void UGodfreyExhibitionQueuePollComponent::PollOnce()
 void UGodfreyExhibitionQueuePollComponent::HandleNoQueue()
 {
 	bStreamInProgress = false;
+	bQueuedSpeechPlaying = false;
 	ActiveStreamAction = nullptr;
 }
 
 void UGodfreyExhibitionQueuePollComponent::HandlePlaybackStarted()
 {
+	bQueuedSpeechPlaying = true;
 	AActor* const AceCharacter = ResolveCharacterForAce();
 	UE_LOG(LogGodfreyExhibitionQueue, Log,
 		TEXT("Queue poll: playback started on %s"),
@@ -546,6 +560,7 @@ void UGodfreyExhibitionQueuePollComponent::HandleFinished()
 {
 	UE_LOG(LogGodfreyExhibitionQueue, Log, TEXT("Queue poll: stream finished"));
 	bStreamInProgress = false;
+	bQueuedSpeechPlaying = false;
 	ActiveStreamAction = nullptr;
 }
 
@@ -553,5 +568,6 @@ void UGodfreyExhibitionQueuePollComponent::HandleError(const FString& ErrorMessa
 {
 	UE_LOG(LogGodfreyExhibitionQueue, Error, TEXT("Queue poll: %s"), *ErrorMessage);
 	bStreamInProgress = false;
+	bQueuedSpeechPlaying = false;
 	ActiveStreamAction = nullptr;
 }

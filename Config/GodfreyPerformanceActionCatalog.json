@@ -68,8 +68,7 @@
       "AS_IdleStanding_01",
       "AS_IdleWeightShift_01",
       "AS_IdleRockingOnFeet_01",
-      "AS_HandsBehindBack_01",
-      "AS_HandsClasped_01"
+      "AS_HandsBehindBack_01"
     ],
     "FarewellWave": "AS_FarewellWave_01",
     "BackToSea": "AS_TransitionIdleToLookToSea_01"

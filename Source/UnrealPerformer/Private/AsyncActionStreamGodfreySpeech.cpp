@@ -397,6 +397,8 @@ void UAsyncActionStreamGodfreySpeech::Activate()
 
 	StreamSession->OnPlaybackEnded.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackEnded);
 
+	StreamSession->OnIngestStallWhileAudioCaughtUp.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionIngestStallWhileAudioCaughtUp);
+
 	StreamSession->OnError.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionError);
 
 
@@ -754,6 +756,8 @@ void UAsyncActionStreamGodfreySpeech::HandleExhibitionTtsStatusCompleted(
 
 	StreamSession->OnPlaybackEnded.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackEnded);
 
+	StreamSession->OnIngestStallWhileAudioCaughtUp.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionIngestStallWhileAudioCaughtUp);
+
 	StreamSession->OnError.AddDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionError);
 
 
@@ -931,7 +935,7 @@ void UAsyncActionStreamGodfreySpeech::StartSpeakStreamPcmPost()
 
 			UAsyncActionStreamGodfreySpeech* Strong = WeakThis.Get();
 
-			if (!Strong || Strong->bDidFinish)
+			if (!Strong || Strong->bDidFinish || Strong->bForcedFinishFromIngestStall)
 
 			{
 
@@ -1775,6 +1779,14 @@ void UAsyncActionStreamGodfreySpeech::HandleRequestCompleted(bool bConnectedSucc
 
 {
 
+	if (bDidFinish || bForcedFinishFromIngestStall)
+
+	{
+
+		return;
+
+	}
+
 	if (!CompletionError.IsEmpty())
 
 	{
@@ -1896,6 +1908,7 @@ void UAsyncActionStreamGodfreySpeech::Cancel()
 		StreamSession->OnPlaybackStarted.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackStarted);
 		StreamSession->OnLipSyncStarted.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionLipSyncStarted);
 		StreamSession->OnPlaybackEnded.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackEnded);
+		StreamSession->OnIngestStallWhileAudioCaughtUp.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionIngestStallWhileAudioCaughtUp);
 		StreamSession->OnError.RemoveDynamic(this, &UAsyncActionStreamGodfreySpeech::HandleSessionError);
 		StreamSession->StopStream();
 		StreamSession = nullptr;
@@ -2018,7 +2031,40 @@ void UAsyncActionStreamGodfreySpeech::HandleSessionPlaybackEnded()
 
 }
 
+void UAsyncActionStreamGodfreySpeech::HandleSessionIngestStallWhileAudioCaughtUp()
+{
+	if (bDidFinish || bHttpCompleteAwaitingFinish || bForcedFinishFromIngestStall)
+	{
+		return;
+	}
 
+	bForcedFinishFromIngestStall = true;
+
+	UE_LOG(LogGodfreySpeechStreamNode, Warning,
+		TEXT("HTTP ingest stall: playback caught sent PCM with no further bytes — cancelling hung stream-pcm and FinishStream. TotalHttpBodyBytes=%lld"),
+		TotalHttpBodyBytesReceived);
+
+	if (ActiveRequest.IsValid())
+	{
+		ActiveRequest->OnRequestProgress64().Unbind();
+		ActiveRequest->OnProcessRequestComplete().Unbind();
+		ActiveRequest->CancelRequest();
+		ActiveRequest.Reset();
+	}
+
+	{
+		FScopeLock Lock(&HttpBodyLock);
+		if (HttpBodyAccum.Num() > 0)
+		{
+			PendingBytes.Append(HttpBodyAccum);
+			HttpBodyAccum.Reset();
+		}
+	}
+
+	bHttpCompleteAwaitingFinish = true;
+	ScheduleHttpBodyDrain();
+	TryFinishStreamAfterHttpComplete();
+}
 
 void UAsyncActionStreamGodfreySpeech::HandleSessionError(const FString& ErrorMessage)
 

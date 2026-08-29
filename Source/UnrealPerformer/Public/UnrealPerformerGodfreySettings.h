@@ -103,6 +103,15 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest", meta = (ClampMin = "1.0", ClampMax = "60.0", UIMin = "5.0", UIMax = "30.0"))
 	float GodfreyAceEndAudioCatchUpTimeoutSeconds = 20.f;
 
+	/**
+	 * If HTTP is still open but audible playback has already caught the PCM we have, and no
+	 * further samples arrive for this long, treat the stream as drained (FinishStream).
+	 * Stops silent lip-sync / speaking-body holds when Brain/TTS hangs mid-reply.
+	 * Must stay longer than a normal mid-reply LLM/TTS gap (Marcia 2026-08-17 clipped at 0.5s).
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest", meta = (ClampMin = "1.0", ClampMax = "15.0", UIMin = "1.5", UIMax = "5.0"))
+	float GodfreyAceIngestStallTimeoutSeconds = 2.5f;
+
 
 
 	/** One line at FinishStream with utterance-relative timings. */
@@ -312,6 +321,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0.01", ClampMax = "0.5"))
 	float GodfreyWebcamOccupancyLeaveFractionThreshold = 0.03f;
 
+	/**
+	 * After two unanswered engagement prompts, wait this long in SeaIdle then recapture
+	 * the empty-room webcam baseline (ghost occupancy was treating a vacant room as Present).
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0.5", ClampMax = "8.0"))
+	float GodfreyAbandonedEmptyRecaptureDelaySeconds = 2.f;
+
 	/** Loop a video on MediaPlate2 in PIE/game (file under Content/, e.g. Movies/foo.mp4). Falls back to Stage_Backdrop if no plate. */
 	UPROPERTY(Config, EditAnywhere, Category = "Exhibit|Backdrop")
 	bool bGodfreyEnableStageBackdropVideo = true;
@@ -323,7 +339,7 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Exhibit|Backdrop")
 	bool bGodfreyHideExhibitFloorInPlay = true;
 
-	/** When Present while SeaIdle, arm Welcome and call NotifyVisitorEngaged (R17). */
+	/** When Present, play the arrival card then Welcome. Mic activity must not skip either (R17). */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence")
 	bool bGodfreyPresenceEngageOnDwell = true;
 
@@ -344,6 +360,31 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (MultiLine = "true", EditCondition = "bGodfreyPresenceFarewellOnAbsence"))
 	FString GodfreyPresenceFarewellSpeakPrompt = TEXT(
 		"(The visitor has walked away and left the scene. Bid them a brief goodbye — use their name if you know it. One short sentence only. End with [farewell].)");
+
+	/** Arrival card over SeaIdle before Welcome speak (portal / lantern / microphone). */
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence")
+	bool bGodfreyEnableVisitorBriefing = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (MultiLine = "true", EditCondition = "bGodfreyEnableVisitorBriefing"))
+	FString GodfreyVisitorBriefingText = TEXT(
+		"This is a way into the past. It is far.\n"
+		"\n"
+		"When the lantern is GREEN, only one may speak.\n"
+		"\n"
+		"Speak clearly into the microphone.\n"
+		"\n"
+		"When it is RED, he cannot hear you.\n"
+		"\n"
+		"Give him a moment. The way is not swift.");
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0.1", ClampMax = "3.0", EditCondition = "bGodfreyEnableVisitorBriefing"))
+	float GodfreyVisitorBriefingFadeInSeconds = 0.8f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "4.0", ClampMax = "40.0", EditCondition = "bGodfreyEnableVisitorBriefing"))
+	float GodfreyVisitorBriefingHoldSeconds = 12.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0.3", ClampMax = "5.0", EditCondition = "bGodfreyEnableVisitorBriefing"))
+	float GodfreyVisitorBriefingFadeOutSeconds = 1.8f;
 
 	/** Top-right brass signal lantern Speak/Wait cue (synced to mic accept window). */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue")
@@ -388,14 +429,21 @@ public:
 
 	/** While Present + in dialog, UE prompts Godfrey after this many Speak-green silent seconds (R10). */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "1.0", ClampMax = "30.0"))
-	float GodfreyDialogEngageSilenceSeconds = 8.0f;
+	float GodfreyDialogEngageSilenceSeconds = 16.0f;
 
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence")
 	bool bGodfreyEnableDialogEngagementPrompts = true;
 
+	/**
+	 * After this many unanswered dialog-engagement AskGodfrey turns, assume the visitor left
+	 * and return to SeaIdle. 0 = keep nudging until VisitorIdleTimeoutSeconds.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0", ClampMax = "8", EditCondition = "bGodfreyEnableDialogEngagementPrompts"))
+	int32 GodfreyDialogEngageMaxUnansweredAttempts = 2;
+
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (MultiLine = "true", EditCondition = "bGodfreyEnableDialogEngagementPrompts"))
 	FString GodfreyDialogEngagePrompt = TEXT(
-		"(The visitor has been quiet for a few seconds. Continue the conversation naturally in one or two short sentences that follow from what was just said. If you do not yet know their name, ask for it. Otherwise ask a brief follow-up or offer a short remark. Stay in character. Do not say goodbye.)");
+		"(The visitor has been quiet for a little while. Continue the conversation naturally in one or two short sentences that follow from what was just said. Do not ask their name if you already have it or have already asked. Do not greet them as a new arrival. Stay in character. Do not say goodbye.)");
 
 	/** Default exhibition queue poll interval (seconds). Components may still override locally. */
 	UPROPERTY(Config, EditAnywhere, Category = "Queue", meta = (ClampMin = "0.2", ClampMax = "5.0"))
@@ -482,6 +530,56 @@ public:
 	/** Blend weight for conversation neck LookAt. */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Gaze", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bGodfreyConversationHeadAim"))
 	float GodfreyConversationHeadAimAlpha = 0.75f;
+
+	/**
+	 * Two-bone IK: when a gesture puts hands/elbows through the jacket, push them out to the sides
+	 * (and, below the chest, forward of the hanging hem). Cloth pin only stops sleeve lag.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume")
+	bool bGodfreyCoatClearance = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceAlpha = 1.f;
+
+	/** Minimum |Y| from chest midline for a hand that is in front of the jacket (cm). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "8.0", ClampMax = "40.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceMinHandLateralCm = 18.f;
+
+	/** Minimum |Y| from chest midline for an elbow that is in front of the jacket (cm). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "10.0", ClampMax = "45.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceMinElbowLateralCm = 22.f;
+
+	/** Only push when the hand/elbow is this far in front of spine_03 (cm). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "0.0", ClampMax = "25.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceForwardStartCm = 6.f;
+
+	/** Below the chest, also keep hands this far in front of spine_03 so they clear the coat hem (cm). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "6.0", ClampMax = "30.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceMinHemForwardCm = 14.f;
+
+	/** Lowest hand/elbow (relative to spine_03) that still gets clearance — cover the long-coat hem. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "-70.0", ClampMax = "10.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceTorsoMinHeightCm = -48.f;
+
+	/** Above this (chin/face band) skip so ThinkingHandToChin still reaches the face. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "10.0", ClampMax = "60.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceTorsoMaxHeightCm = 32.f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "1.0", ClampMax = "40.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceMaxPushCm = 20.f;
+
+	/** How quickly coat-clearance IK eases on/off (higher = snappier). Smooths arm flicks at clip joins. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "1.0", ClampMax = "24.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceInterpSpeed = 8.f;
 
 	/**
 	 * Looping planted-leg clip on DefaultSlot while conversation/idle AS play on UpperBody.

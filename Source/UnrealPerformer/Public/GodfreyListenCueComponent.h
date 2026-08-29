@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UnrealPerformerApi.h"
+#include "Brushes/SlateColorBrush.h"
 #include "Components/ActorComponent.h"
 #include "Styling/SlateBrush.h"
 #include "GodfreyListenCueComponent.generated.h"
@@ -10,6 +11,7 @@ class UTexture2D;
 class SOverlay;
 class SImage;
 class STextBlock;
+class SBorder;
 
 /**
  * Top-right brass signal lantern: dim red + "Wait" while Godfrey speaks / post-speech ignore,
@@ -34,13 +36,16 @@ public:
 	bool bShowLabels = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "48", ClampMax = "256"))
-	float LanternSize = 96.f;
+	float LanternSize = 144.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "0", ClampMax = "64"))
 	float Margin = 20.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "10", ClampMax = "36"))
-	float LabelFontSize = 16.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "10", ClampMax = "48"))
+	float LabelFontSize = 24.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "4", ClampMax = "32"))
+	float BackingPadding = 12.f;
 
 private:
 	void EnsureOverlay();
@@ -60,6 +65,8 @@ private:
 	TSharedPtr<SOverlay> OverlayWidget;
 	TSharedPtr<SImage> LanternImage;
 	TSharedPtr<STextBlock> LabelText;
+	TSharedPtr<SBorder> BackingBorder;
+	TSharedPtr<FSlateColorBrush> BackingBrush;
 	FSlateBrush SpeakBrush;
 	FSlateBrush WaitBrush;
 	bool bOverlayAdded = false;

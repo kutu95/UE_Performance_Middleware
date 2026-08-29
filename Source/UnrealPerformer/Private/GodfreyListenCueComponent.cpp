@@ -1,5 +1,6 @@
 #include "GodfreyListenCueComponent.h"
 
+#include "Brushes/SlateColorBrush.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/Texture2D.h"
@@ -13,7 +14,9 @@
 #include "Misc/Paths.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -182,7 +185,41 @@ void UGodfreyListenCueComponent::EnsureOverlay()
 			.ColorAndOpacity(FSlateColor(FLinearColor(0.92f, 0.86f, 0.72f, 0.95f)))
 			.ShadowOffset(FVector2D(1.f, 1.f))
 			.ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.65f))
-			.Justification(ETextJustify::Center);
+			.Justification(ETextJustify::Center)
+			.AutoWrapText(false);
+
+		if (!BackingBrush.IsValid())
+		{
+			BackingBrush = MakeShared<FSlateColorBrush>(FLinearColor::White);
+		}
+
+		BackingBorder = SNew(SBorder)
+			.BorderImage(BackingBrush.Get())
+			.BorderBackgroundColor(FLinearColor(0.07f, 0.06f, 0.04f, 0.82f))
+			.Padding(FMargin(BackingPadding, BackingPadding, BackingPadding, BackingPadding))
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Top)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.HAlign(HAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(LanternSize)
+					.HeightOverride(LanternSize)
+					[
+						LanternImage.ToSharedRef()
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.HAlign(HAlign_Center)
+				.Padding(FMargin(4.f, 8.f, 4.f, 2.f))
+				[
+					LabelText.ToSharedRef()
+				]
+			];
 
 		OverlayWidget = SNew(SOverlay)
 			+ SOverlay::Slot()
@@ -190,30 +227,7 @@ void UGodfreyListenCueComponent::EnsureOverlay()
 			.VAlign(VAlign_Top)
 			.Padding(FMargin(Margin))
 			[
-				SNew(SBox)
-				.WidthOverride(LanternSize)
-				.HeightOverride(LanternSize + (bShowLabels ? 22.f : 0.f))
-				[
-					SNew(SOverlay)
-					+ SOverlay::Slot()
-					.VAlign(VAlign_Top)
-					.HAlign(HAlign_Center)
-					[
-						SNew(SBox)
-						.WidthOverride(LanternSize)
-						.HeightOverride(LanternSize)
-						[
-							LanternImage.ToSharedRef()
-						]
-					]
-					+ SOverlay::Slot()
-					.VAlign(VAlign_Bottom)
-					.HAlign(HAlign_Center)
-					.Padding(FMargin(0.f, 0.f, 0.f, 2.f))
-					[
-						LabelText.ToSharedRef()
-					]
-				]
+				BackingBorder.ToSharedRef()
 			];
 	}
 
