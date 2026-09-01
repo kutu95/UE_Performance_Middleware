@@ -11,6 +11,7 @@
 
 class UAnimMontage;
 class UAnimSequence;
+class UChaosClothComponent;
 class UDataTable;
 class UGodfreyPerformanceStateComponent;
 class USkeletalMeshComponent;
@@ -111,6 +112,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Bridge|Presence")
 	void PlayFarewellSequence();
 
+	/** Current body AnimSequence asset name (AS_*) for the on-screen debug overlay. */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Performer|Bridge|Debug")
+	FString GetDebugPlayingSequenceName() const;
+
+	/** Play context for the overlay (SpeakingIdle, SeaIdle, Listening, …). */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Performer|Bridge|Debug")
+	FString GetDebugPlayingContextName() const;
+
 	/** If TargetSkeletalMesh is unset, find owner mesh whose name contains BodyMeshNameHint and not FaceMeshNameExclude. */
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Bridge")
 	bool ResolveTargetBodyMesh();
@@ -161,8 +170,8 @@ public:
 	TArray<FName> ClothingFollowerMeshNames = { FName(TEXT("Torso")), FName(TEXT("Legs")), FName(TEXT("Feet")) };
 
 	/**
-	 * Keep coat/tank on the skinned pose (no Chaos Cloth / rigid-body lag).
-	 * Stops coat sleeves punching through the coat body during arm gestures.
+	 * When true, keep coat/tank on the skinned pose (no Chaos Cloth). Overridden at BeginPlay
+	 * when GodfreyCoatClothSimulation is on — then the coat sim collides with the body instead.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|MeshPropagation")
 	bool bPinClothingToSkinnedPose = true;
@@ -265,10 +274,11 @@ public:
 
 	/**
 	 * Prefer non-destructive AS_*_EyeFixed / AM_*_EyeFixed library variants when present.
-	 * Original AS_ and AM_ assets are left unchanged; playback remaps at resolve/play time.
+	 * Overridden at BeginPlay from Project Settings → Animation|Gaze
+	 * (`bGodfreyPreferEyeFixedLibraryVariants`). Currently off while reviewing new takes.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Montages|Library")
-	bool bPreferEyeFixedLibraryVariants = true;
+	bool bPreferEyeFixedLibraryVariants = false;
 
 	/** PIE K/F7 operator capture. No on-screen hint. Console: godfrey.OperatorCapture */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Operator Capture")
@@ -445,8 +455,8 @@ public:
 
 	/**
 	 * Pool for body motion while speaking (R14). Stems without AS_ prefix; EyeFixed preferred.
-	 * Empty → built-in Describing set plus SpeakingDescribe / SpeakingExplain / Calm / Gentle.
-	 * Played as a shuffled non-repeating one-shot deck (soft blend) for the whole utterance — never section-loop one clip.
+	 * Empty → newer Explaining / plea takes plus Describing* / SpeakingDescribe / Calm / Gentle.
+	 * Newer stems are weighted higher in the shuffle. Played as a shuffled one-shot deck.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Montages|Pools")
 	TArray<FString> SpeakingIdlePool;
@@ -464,7 +474,7 @@ public:
 
 	/**
 	 * Pool for the first in-dialog body hold after SeaIdle → dialog (R15). Prefer Greeting* over Listening*.
-	 * Empty → Nod / SmallSmile / HaveASeat / Welcome (TurnToVisitor excluded — camera already frontal).
+	 * Empty → Welcome_02/03 (priority) then Welcome_01 / Nod / SmallSmile / HaveASeat.
 	 * Used once per encounter; subsequent dialog idles use ListeningWhileVisitorSpeaksPool (R9).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Montages|Pools")
@@ -778,6 +788,10 @@ private:
 	void ScheduleMetaHumanClothingRefreshPasses();
 	void PinClothingToSkinnedPose();
 	void ScheduleClothingSkinnedPosePin();
+	void EnableCoatClothSimulation();
+	void TickCoatClothEnable();
+	void ScheduleCoatClothEnable();
+	UChaosClothComponent* EnsureGodfreyCoatClothComponent();
 	void ScheduleEditorCopyPoseStabilize();
 	void ClearPostProcessGarmentLeaderPose(USkeletalMeshComponent* Garment);
 	void MaybeLogMetaHumanShirtDiagnostics(const TCHAR* TriggerReason, bool bForce = false);
@@ -859,6 +873,8 @@ private:
 	void ReshuffleDialogGreetingPoolOrder();
 	FString TakeNextDialogGreetingPoolStem();
 	void ResetFirstDialogGreetingHold();
+	/** Presence Welcome: GreetingWelcome_03 then _01 (_02 shelved — A-pose arms). */
+	UAnimMontage* PickPresenceWelcomeMontage();
 	/** R13: next exhibition sea-idle clip from shuffled deck (EyeFixed when available). */
 	UAnimMontage* PickSeaIdleMontageFromPool(const TCHAR* ContextLabel);
 	void EnsureDefaultSeaIdlePool();
@@ -991,6 +1007,8 @@ private:
 	double SpeakingIdleCycleStartWorldTime = -1.0;
 	TObjectPtr<UAnimMontage> ActiveSpeakingIdlePlayMontage;
 	TObjectPtr<UAnimMontage> ActivePlantedStanceMontage;
+	FString LastDebugPlaySequenceName = TEXT("(none)");
+	FString LastDebugPlayContextName;
 	TObjectPtr<UAnimMontage> ActiveTravelMontage;
 	bool bTravelRootMotionActive = false;
 	FOnMontageEnded SpeakingIdleMontageEndedDelegate;

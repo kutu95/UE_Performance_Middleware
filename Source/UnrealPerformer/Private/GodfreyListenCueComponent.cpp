@@ -13,6 +13,7 @@
 #include "ImageUtils.h"
 #include "Misc/Paths.h"
 #include "Styling/CoreStyle.h"
+#include "UnrealPerformerGodfreySettings.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
@@ -34,6 +35,14 @@ void UGodfreyListenCueComponent::BeginPlay()
 	SpeakLanternTexture = LoadPngTexture(Dir / TEXT("lantern_speak.png"), TEXT("GodfreyLanternSpeak"));
 	WaitLanternTexture = LoadPngTexture(Dir / TEXT("lantern_wait.png"), TEXT("GodfreyLanternWait"));
 
+	if (const UUnrealPerformerGodfreySettings* Settings = GetDefault<UUnrealPerformerGodfreySettings>())
+	{
+		if (!Settings->GodfreySpeakWhileWaitWarningText.IsEmpty())
+		{
+			SpeakWhileWaitWarningText = Settings->GodfreySpeakWhileWaitWarningText;
+		}
+	}
+
 	if (SpeakLanternTexture)
 	{
 		SpeakBrush = FSlateBrush();
@@ -52,7 +61,7 @@ void UGodfreyListenCueComponent::BeginPlay()
 	if (bShowCue)
 	{
 		EnsureOverlay();
-		UpdateCueVisual(ResolveCanVisitorSpeak());
+		UpdateCueVisual(ResolveCanVisitorSpeak(), ResolveSpeakWhileWaitWarning());
 	}
 
 	UE_LOG(LogGodfreyVision, Log,
@@ -87,10 +96,12 @@ void UGodfreyListenCueComponent::TickComponent(
 
 	EnsureOverlay();
 	const bool bCanSpeak = ResolveCanVisitorSpeak();
-	if (!bHasLastCanSpeak || bCanSpeak != bLastCanSpeak)
+	const bool bWarn = ResolveSpeakWhileWaitWarning();
+	if (!bHasLastCanSpeak || bCanSpeak != bLastCanSpeak || bWarn != bLastSpeakWhileWaitWarning)
 	{
-		UpdateCueVisual(bCanSpeak);
+		UpdateCueVisual(bCanSpeak, bWarn);
 		bLastCanSpeak = bCanSpeak;
+		bLastSpeakWhileWaitWarning = bWarn;
 		bHasLastCanSpeak = true;
 	}
 }
@@ -116,7 +127,7 @@ UTexture2D* UGodfreyListenCueComponent::LoadPngTexture(const FString& AbsolutePa
 	return Tex;
 }
 
-FSlateFontInfo UGodfreyListenCueComponent::MakePeriodLabelFont() const
+FSlateFontInfo UGodfreyListenCueComponent::MakePeriodLabelFont(float Size) const
 {
 	FString FontPath = FPaths::ProjectContentDir() / TEXT("UI/GodfreyListenCue/Constantia.ttf");
 	if (!FPaths::FileExists(FontPath))
@@ -132,9 +143,9 @@ FSlateFontInfo UGodfreyListenCueComponent::MakePeriodLabelFont() const
 		const TSharedRef<FCompositeFont> Composite = MakeShared<FCompositeFont>();
 		Composite->DefaultTypeface.Fonts.Add(
 			FTypefaceEntry(TEXT("Regular"), FontPath, EFontHinting::Default, EFontLoadingPolicy::LazyLoad));
-		return FSlateFontInfo(Composite, LabelFontSize, TEXT("Regular"));
+		return FSlateFontInfo(Composite, Size, TEXT("Regular"));
 	}
-	return FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), static_cast<int32>(LabelFontSize));
+	return FCoreStyle::GetDefaultFontStyle(TEXT("Regular"), static_cast<int32>(Size));
 }
 
 UGodfreyVoiceInputComponent* UGodfreyListenCueComponent::ResolveVoiceInput() const
@@ -169,6 +180,15 @@ bool UGodfreyListenCueComponent::ResolveCanVisitorSpeak() const
 	return false;
 }
 
+bool UGodfreyListenCueComponent::ResolveSpeakWhileWaitWarning() const
+{
+	if (const UGodfreyVoiceInputComponent* Voice = ResolveVoiceInput())
+	{
+		return Voice->IsSpeakWhileWaitWarningActive();
+	}
+	return false;
+}
+
 void UGodfreyListenCueComponent::EnsureOverlay()
 {
 	if (bOverlayAdded || !GEngine || !GEngine->GameViewport)
@@ -181,12 +201,23 @@ void UGodfreyListenCueComponent::EnsureOverlay()
 		LanternImage = SNew(SImage).Image(&WaitBrush);
 		LabelText = SNew(STextBlock)
 			.Text(FText::FromString(TEXT("Wait")))
-			.Font(MakePeriodLabelFont())
+			.Font(MakePeriodLabelFont(LabelFontSize))
 			.ColorAndOpacity(FSlateColor(FLinearColor(0.92f, 0.86f, 0.72f, 0.95f)))
 			.ShadowOffset(FVector2D(1.f, 1.f))
 			.ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.65f))
 			.Justification(ETextJustify::Center)
 			.AutoWrapText(false);
+
+		WarningText = SNew(STextBlock)
+			.Text(FText::FromString(SpeakWhileWaitWarningText))
+			.Font(MakePeriodLabelFont(WarningFontSize))
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.82f, 0.62f, 0.96f)))
+			.ShadowOffset(FVector2D(1.f, 1.f))
+			.ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.7f))
+			.Justification(ETextJustify::Center)
+			.AutoWrapText(true)
+			.WrapTextAt(FMath::Max(LanternSize + 48.f, 220.f))
+			.Visibility(EVisibility::Collapsed);
 
 		if (!BackingBrush.IsValid())
 		{
@@ -219,6 +250,13 @@ void UGodfreyListenCueComponent::EnsureOverlay()
 				[
 					LabelText.ToSharedRef()
 				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.HAlign(HAlign_Center)
+				.Padding(FMargin(4.f, 2.f, 4.f, 4.f))
+				[
+					WarningText.ToSharedRef()
+				]
 			];
 
 		OverlayWidget = SNew(SOverlay)
@@ -249,7 +287,7 @@ void UGodfreyListenCueComponent::TearDownOverlay()
 	bOverlayAdded = false;
 }
 
-void UGodfreyListenCueComponent::UpdateCueVisual(bool bCanSpeak)
+void UGodfreyListenCueComponent::UpdateCueVisual(bool bCanSpeak, bool bSpeakWhileWaitWarning)
 {
 	if (!LanternImage.IsValid())
 	{
@@ -269,5 +307,14 @@ void UGodfreyListenCueComponent::UpdateCueVisual(bool bCanSpeak)
 				: FLinearColor(0.92f, 0.72f, 0.62f, 0.95f)));
 	}
 
-	UE_LOG(LogGodfreyVision, Verbose, TEXT("ListenCue: %s"), bCanSpeak ? TEXT("Speak") : TEXT("Wait"));
+	if (WarningText.IsValid())
+	{
+		const bool bShowWarning = bSpeakWhileWaitWarning && !bCanSpeak;
+		WarningText->SetText(FText::FromString(SpeakWhileWaitWarningText));
+		WarningText->SetVisibility(bShowWarning ? EVisibility::Visible : EVisibility::Collapsed);
+	}
+
+	UE_LOG(LogGodfreyVision, Verbose, TEXT("ListenCue: %s warn=%d"),
+		bCanSpeak ? TEXT("Speak") : TEXT("Wait"),
+		bSpeakWhileWaitWarning ? 1 : 0);
 }

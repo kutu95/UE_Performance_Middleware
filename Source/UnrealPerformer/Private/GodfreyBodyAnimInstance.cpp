@@ -73,7 +73,10 @@ void FGodfreyBodyAnimInstanceProxy::Update(float DeltaSeconds)
 			CoatClearanceNode.MinHandLateralCm = Settings->GodfreyCoatClearanceMinHandLateralCm;
 			CoatClearanceNode.MinElbowLateralCm = Settings->GodfreyCoatClearanceMinElbowLateralCm;
 			CoatClearanceNode.ForwardStartCm = Settings->GodfreyCoatClearanceForwardStartCm;
+			CoatClearanceNode.MinChestForwardCm = Settings->GodfreyCoatClearanceMinChestForwardCm;
 			CoatClearanceNode.MinHemForwardCm = Settings->GodfreyCoatClearanceMinHemForwardCm;
+			CoatClearanceNode.HandRadiusCm = Settings->GodfreyCoatClearanceHandRadiusCm;
+			CoatClearanceNode.BehindSkipCm = Settings->GodfreyCoatClearanceBehindSkipCm;
 			CoatClearanceNode.TorsoMinHeightCm = Settings->GodfreyCoatClearanceTorsoMinHeightCm;
 			CoatClearanceNode.TorsoMaxHeightCm = Settings->GodfreyCoatClearanceTorsoMaxHeightCm;
 			CoatClearanceNode.MaxPushCm = Settings->GodfreyCoatClearanceMaxPushCm;
@@ -172,8 +175,14 @@ void UGodfreyBodyAnimInstance::EnsureNeutralStanceSequenceLoaded()
 	{
 		return;
 	}
+	const bool bPreferEyeFixed = GetDefault<UUnrealPerformerGodfreySettings>()
+		&& GetDefault<UUnrealPerformerGodfreySettings>()->bGodfreyPreferEyeFixedLibraryVariants;
 	for (const TCHAR* Path : GGodfreyNeutralStancePaths)
 	{
+		if (!bPreferEyeFixed && FString(Path).Contains(TEXT("_EyeFixed"), ESearchCase::IgnoreCase))
+		{
+			continue;
+		}
 		if (UAnimSequence* const Seq = LoadObject<UAnimSequence>(nullptr, Path))
 		{
 			NeutralStanceSequence = Seq;

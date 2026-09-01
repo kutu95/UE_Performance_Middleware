@@ -89,36 +89,56 @@ void FAnimNode_GodfreyCoatClearance::ComputeArmPush(
 		return;
 	}
 
-	const FVector HandLoc = Output.Pose.GetComponentSpaceTransform(HandIdx).GetLocation();
+	const FTransform HandCS = Output.Pose.GetComponentSpaceTransform(HandIdx);
+	const FVector WristLoc = HandCS.GetLocation();
 	const FVector ElbowLoc = Output.Pose.GetComponentSpaceTransform(LowerIdx).GetLocation();
-	const FVector RelHand = HandLoc - Chest;
-	const FVector RelElbow = ElbowLoc - Chest;
+	// MetaHuman hand_l/r X runs wrist → knuckles. Fingers clip the coat before the wrist bone does.
+	const FVector PalmLoc = WristLoc + HandCS.GetUnitAxis(EAxis::X) * FMath::Max(0.f, HandRadiusCm);
 
-	const float HandFwd = FVector::DotProduct(RelHand, Forward);
-	const float HandLat = FVector::DotProduct(RelHand, Right);
-	const float HandHgt = RelHand.Z;
+	auto AccumulateHandSample = [this, SideSign, &Chest, &Forward, &Right, &OutHandPush, &OutHandFwdPush](const FVector& SampleLoc)
+	{
+		const FVector Rel = SampleLoc - Chest;
+		const float Fwd = FVector::DotProduct(Rel, Forward);
+		const float Lat = FVector::DotProduct(Rel, Right);
+		const float Hgt = Rel.Z;
+		if (Hgt < TorsoMinHeightCm || Hgt > TorsoMaxHeightCm)
+		{
+			return;
+		}
+		// Behind the back (HandsBehindBack) — leave alone.
+		if (Fwd < BehindSkipCm)
+		{
+			return;
+		}
+
+		const float DesiredLat = SideSign * MinHandLateralCm;
+		const float NewLat = (SideSign < 0.f)
+			? FMath::Min(Lat, DesiredLat)
+			: FMath::Max(Lat, DesiredLat);
+		const float ThisPush = FMath::Clamp(NewLat - Lat, -MaxPushCm, MaxPushCm);
+		if (FMath::Abs(ThisPush) > FMath::Abs(OutHandPush))
+		{
+			OutHandPush = ThisPush;
+		}
+
+		// Only push forward while the sample still overlaps the coat body in Y.
+		// Hanging-at-sides hands are already past MinHandLateral and stay put.
+		if (FMath::Abs(Lat) < MinHandLateralCm)
+		{
+			const float MinFwd = (Hgt < 0.f) ? MinHemForwardCm : MinChestForwardCm;
+			OutHandFwdPush = FMath::Max(OutHandFwdPush, FMath::Clamp(MinFwd - Fwd, 0.f, MaxPushCm));
+		}
+	};
+
+	AccumulateHandSample(WristLoc);
+	AccumulateHandSample(PalmLoc);
+
+	const FVector RelElbow = ElbowLoc - Chest;
 	const float ElbowFwd = FVector::DotProduct(RelElbow, Forward);
 	const float ElbowLat = FVector::DotProduct(RelElbow, Right);
 	const float ElbowHgt = RelElbow.Z;
-
-	const bool bHandInCoatBand = HandHgt >= TorsoMinHeightCm && HandHgt <= TorsoMaxHeightCm;
-	if (bHandInCoatBand && HandFwd >= ForwardStartCm)
-	{
-		const float DesiredLat = SideSign * MinHandLateralCm;
-		const float NewLat = (SideSign < 0.f)
-			? FMath::Min(HandLat, DesiredLat)
-			: FMath::Max(HandLat, DesiredLat);
-		OutHandPush = FMath::Clamp(NewLat - HandLat, -MaxPushCm, MaxPushCm);
-
-		// Long-coat hem: hands in front of the belly/hips sit inside the hanging panels.
-		if (HandHgt < 0.f && MinHemForwardCm > ForwardStartCm)
-		{
-			OutHandFwdPush = FMath::Clamp(MinHemForwardCm - HandFwd, 0.f, MaxPushCm);
-		}
-	}
-
 	const bool bElbowInCoatBand = ElbowHgt >= TorsoMinHeightCm && ElbowHgt <= TorsoMaxHeightCm;
-	if (bElbowInCoatBand && ElbowFwd >= ForwardStartCm)
+	if (bElbowInCoatBand && ElbowFwd >= BehindSkipCm)
 	{
 		const float DesiredElbowLat = SideSign * MinElbowLateralCm;
 		const float NewElbowLat = (SideSign < 0.f)

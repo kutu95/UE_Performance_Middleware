@@ -399,6 +399,7 @@ void UGodfreyVoiceInputComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	}
 	bWasCanVisitorSpeak = bCanSpeakNow;
 
+	UpdateSpeakWhileWaitWarning(DeltaTime);
 	FlushCaptureToSocket();
 }
 
@@ -515,6 +516,112 @@ bool UGodfreyVoiceInputComponent::IsGodfreySpeaking() const
 	return false;
 }
 
+bool UGodfreyVoiceInputComponent::IsSpeakWhileWaitWarningActive() const
+{
+	if (SpeakWhileWaitWarningUntilWorldTime < 0.0)
+	{
+		return false;
+	}
+	const UWorld* World = GetWorld();
+	return World && World->GetTimeSeconds() < SpeakWhileWaitWarningUntilWorldTime;
+}
+
+bool UGodfreyVoiceInputComponent::ShouldDetectSpeakWhileWait() const
+{
+	if (!bWarnIfSpeakWhileWait || !bListening || !bWantListening || bBriefingHold)
+	{
+		return false;
+	}
+	if (CanVisitorSpeak())
+	{
+		return false;
+	}
+	// Echo guard after playback is still Wait, but speaker tail would false-trigger.
+	if (IsInPostSpeechIgnore())
+	{
+		return false;
+	}
+	return IsGodfreySpeaking();
+}
+
+void UGodfreyVoiceInputComponent::NoteCaptureEnergy(const float* InAudio, int32 NumFrames, int32 NumChannels)
+{
+	const int32 SafeChannels = FMath::Max(1, NumChannels);
+	double SumSq = 0.0;
+	for (int32 Frame = 0; Frame < NumFrames; ++Frame)
+	{
+		const float Sample = GodfreyVoiceInputPrivate::ReadMonoSample(InAudio, Frame, SafeChannels);
+		SumSq += static_cast<double>(Sample) * static_cast<double>(Sample);
+	}
+	const float Rms = FMath::Sqrt(static_cast<float>(SumSq / static_cast<double>(FMath::Max(1, NumFrames))));
+	FScopeLock Lock(&CaptureMutex);
+	LastCaptureRms = Rms;
+}
+
+void UGodfreyVoiceInputComponent::UpdateSpeakWhileWaitWarning(float DeltaTime)
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	const double Now = World->GetTimeSeconds();
+
+	if (CanVisitorSpeak())
+	{
+		SpeakWhileWaitLoudSeconds = 0.f;
+		SpeakWhileWaitWarningUntilWorldTime = -1.0;
+		return;
+	}
+
+	if (!ShouldDetectSpeakWhileWait())
+	{
+		SpeakWhileWaitLoudSeconds = 0.f;
+		return;
+	}
+
+	float Rms = 0.f;
+	{
+		FScopeLock Lock(&CaptureMutex);
+		Rms = LastCaptureRms;
+	}
+
+	const float FloorAlpha = FMath::Clamp(DeltaTime * 1.5f, 0.02f, 0.25f);
+	if (Rms < SpeakWhileWaitRmsThreshold)
+	{
+		SpeakWhileWaitBleedFloor = FMath::Lerp(SpeakWhileWaitBleedFloor, Rms, FloorAlpha);
+		SpeakWhileWaitLoudSeconds = 0.f;
+		return;
+	}
+
+	const float Gate = FMath::Max(SpeakWhileWaitRmsThreshold, SpeakWhileWaitBleedFloor * SpeakWhileWaitBleedHeadroom);
+	if (Rms < Gate)
+	{
+		SpeakWhileWaitBleedFloor = FMath::Lerp(SpeakWhileWaitBleedFloor, Rms, FloorAlpha * 0.35f);
+		SpeakWhileWaitLoudSeconds = 0.f;
+		return;
+	}
+
+	SpeakWhileWaitLoudSeconds += DeltaTime;
+	if (SpeakWhileWaitLoudSeconds < SpeakWhileWaitHoldSeconds)
+	{
+		return;
+	}
+	if (Now < SpeakWhileWaitCooldownUntilWorldTime)
+	{
+		return;
+	}
+
+	SpeakWhileWaitLoudSeconds = 0.f;
+	SpeakWhileWaitWarningUntilWorldTime = Now + static_cast<double>(SpeakWhileWaitDisplaySeconds);
+	SpeakWhileWaitCooldownUntilWorldTime = Now + static_cast<double>(SpeakWhileWaitCooldownSeconds);
+	UE_LOG(LogGodfreyVoiceInput, Log,
+		TEXT("GodfreyVoiceInput: speak-while-Wait reminder (rms=%.3f floor=%.3f gate=%.3f)."),
+		Rms,
+		SpeakWhileWaitBleedFloor,
+		Gate);
+}
+
 void UGodfreyVoiceInputComponent::StartListening()
 {
 	bWantListening = true;
@@ -580,6 +687,8 @@ void UGodfreyVoiceInputComponent::StopListening()
 	bBriefingHold = false;
 	bServerReady = false;
 	bSpeechActive = false;
+	SpeakWhileWaitLoudSeconds = 0.f;
+	SpeakWhileWaitWarningUntilWorldTime = -1.0;
 	SetComponentTickEnabled(false);
 
 	UE_LOG(LogGodfreyVoiceInput, Log, TEXT("GodfreyVoiceInput: listening stopped."));
@@ -743,7 +852,14 @@ void UGodfreyVoiceInputComponent::CloseCaptureStream()
 
 void UGodfreyVoiceInputComponent::OnCaptureAudio(const float* InAudio, int32 NumFrames, int32 NumChannels, int32 SampleRate)
 {
-	if (!bListening || bMicPaused || !InAudio || NumFrames <= 0)
+	if (!bListening || !InAudio || NumFrames <= 0)
+	{
+		return;
+	}
+
+	NoteCaptureEnergy(InAudio, NumFrames, NumChannels);
+
+	if (bMicPaused)
 	{
 		return;
 	}

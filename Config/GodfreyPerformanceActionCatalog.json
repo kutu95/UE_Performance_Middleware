@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "libraryPath": "/Game/Godfrey/Animation/Animation/Performances",
   "naming": "AS_<Category><Action>_<Variant>  →  optional AM_<same stem> (UpperBody overlay; DefaultSlot planted stance)",
   "rootMotion": {
@@ -27,6 +27,12 @@
     "SpeakingIdle": "AS_SpeakingCalmExplanation_01",
     "SpeakingIdleNote": "Fallback only — runtime uses SpeakingIdlePool (R14) shuffled one-shot chain.",
     "SpeakingIdlePool": [
+      "AS_Explaining_01",
+      "AS_Explaining_02",
+      "AS_ExplainingFirmly_01",
+      "AS_DescribingWhere_01",
+      "AS_WantingToBeUnderstood_01",
+      "AS_SummingUpHisCase_01",
       "AS_SpeakingCalmExplanation_01",
       "AS_SpeakingGentleEmphasis_01",
       "AS_SpeakingDescribeDistance_01",
@@ -51,10 +57,11 @@
     "EngageGreet": "AS_GreetingWelcome_01",
     "EngageGreetNote": "Not auto-played on speech engage montage path (R2). First dialog body hold may still use DialogGreetingPool once (R15).",
     "DialogGreetingPool": [
+      "AS_GreetingWelcome_03",
+      "AS_GreetingWelcome_01",
       "AS_GreetingNod_01",
       "AS_GreetingSmallSmile_01",
-      "AS_GreetingHaveASeat_01",
-      "AS_GreetingWelcome_01"
+      "AS_GreetingHaveASeat_01"
     ],
     "ListeningPool": [
       "AS_ListeningAttentive_01",
@@ -84,6 +91,10 @@
     "DescribingWhatHappenedThatNight_01",
     "DescribingWhatVisitorsShouldRemember_01",
     "DescribingWhatYouWouldDoDifferently_01",
+    "DescribingWhere_01",
+    "Explaining_01",
+    "Explaining_02",
+    "ExplainingFirmly_01",
     "FarewellFinishSpeaking_01",
     "FarewellNod_01",
     "FarewellRelaxPosture_01",
@@ -93,6 +104,8 @@
     "GreetingSmallSmile_01",
     "GreetingTurnToVisitor_01",
     "GreetingWelcome_01",
+    "GreetingWelcome_02",
+    "GreetingWelcome_03",
     "HandsBehindBack_01",
     "HandsClasped_01",
     "IdleLookingToSea_01",
@@ -122,6 +135,7 @@
     "SpeakingDescribeSize_01",
     "SpeakingExplainDanger_01",
     "SpeakingGentleEmphasis_01",
+    "SummingUpHisCase_01",
     "Surprised_01",
     "Thinking_01",
     "Thinking_02",
@@ -140,7 +154,9 @@
     "TransitionSpeakingToIdle_01",
     "TransitionSpeakingToReflectivePause_01",
     "TransitionThinkingToSpeaking_01",
-    "TwoThumbsUp_01"
+    "TwoThumbsUp_01",
+    "WantingToBeUnderstood_01",
+    "WantingYouToHear_01"
   ],
   "authoringOnly": [
     "Perf_* MetaHuman Performance assets",

@@ -4,9 +4,15 @@
 #include "Components/ActorComponent.h"
 #include "GodfreyRuntimePerfHudComponent.generated.h"
 
+class STextBlock;
+class SWidget;
+struct FSlateColorBrush;
+class UGodfreyPerformerAnimationBridgeComponent;
+
 /**
- * Development-only on-screen Godfrey performance overlay (FPS, speech latency, SpeechId, behaviour).
- * Toggle with Project Settings → GodfreyPerfHudToggleKey (default F8). No gameplay side effects.
+ * Development-only on-screen Godfrey overlay:
+ * - F8: FPS / speech latency line (no gameplay side effects).
+ * - Always-on (F6 toggles) top-left box with the current body AnimSequence name.
  */
 UCLASS(ClassGroup = (Godfrey), meta = (BlueprintSpawnableComponent))
 class UNREAL_PERFORMER_API UGodfreyRuntimePerfHudComponent : public UActorComponent
@@ -31,5 +37,18 @@ public:
 
 private:
 	void DrawHud() const;
+	void EnsureAnimOverlay();
+	void TearDownAnimOverlay();
+	void UpdateAnimOverlay();
+	UGodfreyPerformerAnimationBridgeComponent* ResolveBridge() const;
+
 	bool bHudVisible = true;
+	bool bAnimOverlayVisible = true;
+	bool bAnimOverlayAdded = false;
+
+	TSharedPtr<SWidget> AnimOverlayWidget;
+	TSharedPtr<STextBlock> AnimNameText;
+	TSharedPtr<STextBlock> AnimContextText;
+	TSharedPtr<FSlateColorBrush> AnimBackingBrush;
+	mutable TWeakObjectPtr<UGodfreyPerformerAnimationBridgeComponent> CachedBridge;
 };

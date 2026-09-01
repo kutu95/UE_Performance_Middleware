@@ -163,6 +163,11 @@ void UGodfreyDiagnosticsSubsystem::SetCurrentAnimationName(const FString& AnimNa
 	CurrentAnimationName = AnimName;
 }
 
+void UGodfreyDiagnosticsSubsystem::SetCurrentAnimationContext(const FString& ContextName)
+{
+	CurrentAnimationContext = ContextName;
+}
+
 void UGodfreyDiagnosticsSubsystem::SetQueueLength(int32 Length)
 {
 	QueueLength = Length;

@@ -136,6 +136,16 @@ void UGodfreyVisitorBriefingComponent::NotifyZoneEmpty()
 	bCompletedThisOccupancy = false;
 }
 
+void UGodfreyVisitorBriefingComponent::NotifyNewEncounter()
+{
+	if (bPlaying)
+	{
+		UE_LOG(LogGodfreyVision, Log, TEXT("VisitorBriefing: restarting for new encounter."));
+		FinishPlaying(false);
+	}
+	bCompletedThisOccupancy = false;
+}
+
 void UGodfreyVisitorBriefingComponent::SkipToFinish()
 {
 	if (!bPlaying)

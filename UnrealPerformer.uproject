@@ -79,6 +79,14 @@
 			"Enabled": true
 		},
 		{
+			"Name": "ChaosClothAsset",
+			"Enabled": true
+		},
+		{
+			"Name": "ChaosOutfitAsset",
+			"Enabled": true
+		},
+		{
 			"Name": "Takes",
 			"Enabled": true
 		},

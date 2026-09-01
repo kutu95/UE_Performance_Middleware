@@ -53,13 +53,19 @@ void UGodfreyExhibitionQueuePollComponent::BeginPlay()
 	}
 
 #if !UE_BUILD_SHIPPING
-	if (GetDefault<UUnrealPerformerGodfreySettings>()->bGodfreyShowRuntimePerfHud)
 	{
-		if (AActor* Owner = GetOwner())
+		const UUnrealPerformerGodfreySettings* HudSettings = GetDefault<UUnrealPerformerGodfreySettings>();
+		if (HudSettings->bGodfreyShowRuntimePerfHud || HudSettings->bGodfreyShowCurrentAnimHud)
 		{
-			if (!Owner->FindComponentByClass<UGodfreyRuntimePerfHudComponent>())
+			AActor* HudOwner = ResolveCharacterForAce();
+			if (!HudOwner)
 			{
-				UGodfreyRuntimePerfHudComponent* Hud = NewObject<UGodfreyRuntimePerfHudComponent>(Owner, TEXT("GodfreyRuntimePerfHud"));
+				HudOwner = GetOwner();
+			}
+			if (HudOwner && !HudOwner->FindComponentByClass<UGodfreyRuntimePerfHudComponent>())
+			{
+				UGodfreyRuntimePerfHudComponent* Hud =
+					NewObject<UGodfreyRuntimePerfHudComponent>(HudOwner, TEXT("GodfreyRuntimePerfHud"));
 				Hud->RegisterComponent();
 			}
 		}
@@ -386,6 +392,12 @@ void UGodfreyExhibitionQueuePollComponent::EnsureGameMicrophoneComponents()
 			Voice->PreferredCaptureDeviceNameFilter = Settings->GodfreyPreferredCaptureDeviceNameFilter;
 			Voice->bEnableMissedTranscriptPrompt = Settings->bGodfreyEnableMissedTranscriptPrompt;
 			Voice->MissedTranscriptTimeoutSeconds = Settings->GodfreyMissedTranscriptTimeoutSeconds;
+			Voice->bWarnIfSpeakWhileWait = Settings->bGodfreyWarnIfSpeakWhileWait;
+			Voice->SpeakWhileWaitRmsThreshold = Settings->GodfreySpeakWhileWaitRmsThreshold;
+			Voice->SpeakWhileWaitBleedHeadroom = Settings->GodfreySpeakWhileWaitBleedHeadroom;
+			Voice->SpeakWhileWaitHoldSeconds = Settings->GodfreySpeakWhileWaitHoldSeconds;
+			Voice->SpeakWhileWaitDisplaySeconds = Settings->GodfreySpeakWhileWaitDisplaySeconds;
+			Voice->SpeakWhileWaitCooldownSeconds = Settings->GodfreySpeakWhileWaitCooldownSeconds;
 			if (!Settings->GodfreyMissedTranscriptPrompt.IsEmpty())
 			{
 				Voice->MissedTranscriptPrompt = Settings->GodfreyMissedTranscriptPrompt;

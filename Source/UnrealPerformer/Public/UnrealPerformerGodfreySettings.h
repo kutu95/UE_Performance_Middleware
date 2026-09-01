@@ -83,14 +83,10 @@ public:
 	float GodfreyAceSoftThrottleMediumUnmatchedSeconds = 0.45f;
 
 	/**
-	 * After HTTP+PCM drain, defer EndAudioSamples while (sent − maxCurveTs) exceeds
-	 * GodfreyAceEndAudioMaxUnmatchedSeconds and ACE is already playing.
-	 *
-	 * Off by default: streaming A2F withholds the last ~0.5-0.9s of curves until end-of-stream is
-	 * signalled, so waiting for curves to catch up before calling EndAudioSamples cannot succeed.
-	 * The wait ends only via the watchdog or the catch-up timeout, by which point the tail of the
-	 * utterance has already played with no curves - which is the audible dropout and frozen lip
-	 * sync at the end of every speak. Enable only to restore the old hitch-avoidance behaviour.
+	 * After HTTP+PCM drain, defer EndAudioSamples while ACE is still mid-utterance
+	 * (playhead behind sent PCM). A2F withholds ~0.8–0.9s of curves until EndAudioSamples,
+	 * so unmatched can look “caught up” while Welcome is still playing — do not flush on that
+	 * floor alone (Welcome hitch). Wait until the playhead has reached sent PCM.
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest")
 	bool bGodfreyDeferEndAudioSamplesForCurveCatchUp = false;
@@ -107,10 +103,11 @@ public:
 	 * If HTTP is still open but audible playback has already caught the PCM we have, and no
 	 * further samples arrive for this long, treat the stream as drained (FinishStream).
 	 * Stops silent lip-sync / speaking-body holds when Brain/TTS hangs mid-reply.
-	 * Must stay longer than a normal mid-reply LLM/TTS gap (Marcia 2026-08-17 clipped at 0.5s).
+	 * Must stay longer than a pipelined ElevenLabs flush of the closing sentence (2.5s clipped
+	 * "Thank you, Fred" while TTS was still synthesizing the tail).
 	 */
-	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest", meta = (ClampMin = "1.0", ClampMax = "15.0", UIMin = "1.5", UIMax = "5.0"))
-	float GodfreyAceIngestStallTimeoutSeconds = 2.5f;
+	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest", meta = (ClampMin = "1.0", ClampMax = "15.0", UIMin = "1.5", UIMax = "8.0"))
+	float GodfreyAceIngestStallTimeoutSeconds = 6.0f;
 
 
 
@@ -275,6 +272,14 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|HUD")
 	FKey GodfreyPerfHudToggleKey = EKeys::F8;
 
+	/** Show a top-left box with the current body AnimSequence name (PIE / Development). */
+	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|HUD")
+	bool bGodfreyShowCurrentAnimHud = true;
+
+	/** Toggle key for the current-animation name box (PIE). Independent of F8 briefing skip. */
+	UPROPERTY(Config, EditAnywhere, Category = "Diagnostics|HUD")
+	FKey GodfreyCurrentAnimHudToggleKey = EKeys::F6;
+
 	/** Auto-spawn webcam visitor presence on exhibition GameMode BeginPlay. */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence")
 	bool bGodfreyEnableVisitorPresenceWebcam = true;
@@ -327,6 +332,13 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0.5", ClampMax = "8.0"))
 	float GodfreyAbandonedEmptyRecaptureDelaySeconds = 2.f;
+
+	/**
+	 * After a visitor says goodbye, wait this long for them to leave. If occupancy is still
+	 * Present (or they speak), play the arrival card and Welcome the next visitor (R12/R17).
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float GodfreyPostFarewellSuccessorSeconds = 3.f;
 
 	/** Loop a video on MediaPlate2 in PIE/game (file under Content/, e.g. Movies/foo.mp4). Falls back to Stage_Backdrop if no plate. */
 	UPROPERTY(Config, EditAnywhere, Category = "Exhibit|Backdrop")
@@ -393,6 +405,34 @@ public:
 	/** Show Speak/Wait labels under the lantern (Constantia). */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue", meta = (EditCondition = "bGodfreyShowListenCueLantern"))
 	bool bGodfreyListenCueShowLabels = true;
+
+	/** Remind visitors who talk while the lantern is Wait (local mic energy; STT stays paused). */
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue", meta = (EditCondition = "bGodfreyShowListenCueLantern"))
+	bool bGodfreyWarnIfSpeakWhileWait = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue",
+		meta = (MultiLine = "true", EditCondition = "bGodfreyWarnIfSpeakWhileWait"))
+	FString GodfreySpeakWhileWaitWarningText = TEXT("He cannot hear you. Speak only when the lantern is green.");
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue",
+		meta = (ClampMin = "0.01", ClampMax = "0.25", EditCondition = "bGodfreyWarnIfSpeakWhileWait"))
+	float GodfreySpeakWhileWaitRmsThreshold = 0.045f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue",
+		meta = (ClampMin = "1.2", ClampMax = "6.0", EditCondition = "bGodfreyWarnIfSpeakWhileWait"))
+	float GodfreySpeakWhileWaitBleedHeadroom = 2.5f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue",
+		meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "bGodfreyWarnIfSpeakWhileWait"))
+	float GodfreySpeakWhileWaitHoldSeconds = 0.4f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue",
+		meta = (ClampMin = "1.0", ClampMax = "12.0", EditCondition = "bGodfreyWarnIfSpeakWhileWait"))
+	float GodfreySpeakWhileWaitDisplaySeconds = 5.0f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue",
+		meta = (ClampMin = "2.0", ClampMax = "30.0", EditCondition = "bGodfreyWarnIfSpeakWhileWait"))
+	float GodfreySpeakWhileWaitCooldownSeconds = 10.0f;
 
 	/** Keep the mic paused after ACE audible end so speaker tail is not transcribed as the visitor. */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Listen Cue", meta = (ClampMin = "0.0", ClampMax = "8.0"))
@@ -523,6 +563,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Gaze")
 	bool bGodfreyConversationHeadAim = true;
 
+	/**
+	 * Play AS_*_EyeFixed copies (baked GAZE_LIFT / lid balance). Off = authored eye curves.
+	 * Leave false while reviewing new takes; turn back on after EyeFixed is rebuilt for them.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Gaze")
+	bool bGodfreyPreferEyeFixedLibraryVariants = false;
+
 	/** Max degrees the neck may rotate from the authored pose toward the cine camera. */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Gaze", meta = (ClampMin = "2.0", ClampMax = "35.0", EditCondition = "bGodfreyConversationHeadAim"))
 	float GodfreyConversationHeadAimClampDegrees = 16.f;
@@ -532,35 +579,67 @@ public:
 	float GodfreyConversationHeadAimAlpha = 0.75f;
 
 	/**
-	 * Two-bone IK: when a gesture puts hands/elbows through the jacket, push them out to the sides
-	 * (and, below the chest, forward of the hanging hem). Cloth pin only stops sleeve lag.
+	 * Let Chaos Cloth on the coat deform against the body physics asset (arms/hands push the
+	 * panels in). When true, coat-clearance IK stays off and clothing is not pinned to the skin.
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume")
-	bool bGodfreyCoatClearance = true;
+	bool bGodfreyCoatClothSimulation = true;
+
+	/** Chaos Cloth / Outfit asset used when the assembled costume mesh has no clothing data. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (EditCondition = "bGodfreyCoatClothSimulation"))
+	FSoftObjectPath GodfreyCoatClothAsset = FSoftObjectPath(TEXT("/Game/Outfits/OA_Casual_formal.OA_Casual_formal"));
+
+	/** Scale of painted cloth max-distance. 1 = full authored sim. Lower if sleeves lag the arms. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "0.15", ClampMax = "1.0", EditCondition = "bGodfreyCoatClothSimulation"))
+	float GodfreyCoatClothMaxDistanceScale = 1.f;
+
+	/**
+	 * Off by default: two-bone IK that pushed hands/elbows off the jacket (looked held away
+	 * from the body). Keep off while coat cloth simulation is the clearance path (R23).
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume")
+	bool bGodfreyCoatClearance = false;
 
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
 		meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bGodfreyCoatClearance"))
 	float GodfreyCoatClearanceAlpha = 1.f;
 
-	/** Minimum |Y| from chest midline for a hand that is in front of the jacket (cm). */
+	/** Minimum |Y| from chest midline for a hand that overlaps the jacket (cm). */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
 		meta = (ClampMin = "8.0", ClampMax = "40.0", EditCondition = "bGodfreyCoatClearance"))
-	float GodfreyCoatClearanceMinHandLateralCm = 18.f;
+	float GodfreyCoatClearanceMinHandLateralCm = 22.f;
 
-	/** Minimum |Y| from chest midline for an elbow that is in front of the jacket (cm). */
+	/** Minimum |Y| from chest midline for an elbow that overlaps the jacket (cm). */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
 		meta = (ClampMin = "10.0", ClampMax = "45.0", EditCondition = "bGodfreyCoatClearance"))
-	float GodfreyCoatClearanceMinElbowLateralCm = 22.f;
+	float GodfreyCoatClearanceMinElbowLateralCm = 24.f;
 
-	/** Only push when the hand/elbow is this far in front of spine_03 (cm). */
+	/** Unused as a start gate (kept for ini). Hands behind the back use BehindSkipCm instead. */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
 		meta = (ClampMin = "0.0", ClampMax = "25.0", EditCondition = "bGodfreyCoatClearance"))
 	float GodfreyCoatClearanceForwardStartCm = 6.f;
 
-	/** Below the chest, also keep hands this far in front of spine_03 so they clear the coat hem (cm). */
+	/** Chest/belly: keep overlapping palms this far in front of spine_03 (cm). */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
 		meta = (ClampMin = "6.0", ClampMax = "30.0", EditCondition = "bGodfreyCoatClearance"))
-	float GodfreyCoatClearanceMinHemForwardCm = 14.f;
+	float GodfreyCoatClearanceMinChestForwardCm = 12.f;
+
+	/** Below the chest, keep overlapping hands this far in front of spine_03 so they clear the hem (cm). */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "6.0", ClampMax = "30.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceMinHemForwardCm = 16.f;
+
+	/** Offset along the hand bone toward the knuckles — fingers punch through before the wrist does. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "0.0", ClampMax = "20.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceHandRadiusCm = 11.f;
+
+	/** Hands further back than this (cm along chest forward) are behind-the-back and left alone. */
+	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
+		meta = (ClampMin = "-25.0", ClampMax = "0.0", EditCondition = "bGodfreyCoatClearance"))
+	float GodfreyCoatClearanceBehindSkipCm = -8.f;
 
 	/** Lowest hand/elbow (relative to spine_03) that still gets clearance — cover the long-coat hem. */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
@@ -574,7 +653,7 @@ public:
 
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",
 		meta = (ClampMin = "1.0", ClampMax = "40.0", EditCondition = "bGodfreyCoatClearance"))
-	float GodfreyCoatClearanceMaxPushCm = 20.f;
+	float GodfreyCoatClearanceMaxPushCm = 28.f;
 
 	/** How quickly coat-clearance IK eases on/off (higher = snappier). Smooths arm flicks at clip joins. */
 	UPROPERTY(Config, EditAnywhere, Category = "Animation|Costume",

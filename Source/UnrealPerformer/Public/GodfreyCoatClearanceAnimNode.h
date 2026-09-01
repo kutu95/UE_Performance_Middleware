@@ -22,14 +22,20 @@ struct FAnimNode_GodfreyCoatClearance : public FAnimNode_SkeletalControlBase
 	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
 
 	bool bEnabled = true;
-	float MinHandLateralCm = 18.f;
-	float MinElbowLateralCm = 22.f;
+	float MinHandLateralCm = 22.f;
+	float MinElbowLateralCm = 24.f;
 	float ForwardStartCm = 6.f;
+	/** Chest/belly: keep palms this far in front of spine_03 when they overlap the coat body. */
+	float MinChestForwardCm = 12.f;
 	/** Below chest: also push hands forward of the hanging coat panels (hem). */
-	float MinHemForwardCm = 14.f;
+	float MinHemForwardCm = 16.f;
+	/** Wrist-to-knuckle pad so fingers, not just the hand bone, stay outside the cloth. */
+	float HandRadiusCm = 11.f;
+	/** Hands further back than this (cm, along chest forward) are behind-the-back and left alone. */
+	float BehindSkipCm = -8.f;
 	float TorsoMinHeightCm = -48.f;
 	float TorsoMaxHeightCm = 32.f;
-	float MaxPushCm = 20.f;
+	float MaxPushCm = 28.f;
 	/** How quickly clearance IK eases on/off. Higher = snappier. */
 	float InterpSpeed = 8.f;
 

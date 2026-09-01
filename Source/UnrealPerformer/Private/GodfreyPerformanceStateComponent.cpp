@@ -147,6 +147,25 @@ void UGodfreyPerformanceStateComponent::NotifyVisitorSpeechBegan()
 	AbortDialogEngagePromptIfInFlight(TEXT("visitor speech_started"));
 	UE_LOG(LogGodfreyPerformance, Log,
 		TEXT("GodfreyPerformer: visitor speech began — dialog engage timer cleared."));
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!IsValid(Actor))
+		{
+			continue;
+		}
+		if (UGodfreyVisitorPresenceComponent* Presence =
+			Actor->FindComponentByClass<UGodfreyVisitorPresenceComponent>())
+		{
+			Presence->NotifyPostFarewellVisitorSpeech();
+		}
+	}
 }
 
 void UGodfreyPerformanceStateComponent::NotifyVisitorSpeechEnded()

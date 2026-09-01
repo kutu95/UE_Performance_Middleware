@@ -55,10 +55,10 @@ These look arbitrary and are not. Do not "tidy" them without re-reading this fil
 | Setting | Value | Why |
 |---|---|---|
 | `bGodfreyAcePaceIngestByCurveCatchUp` | `False` | **Critical.** When `True`, Unreal throttles pushes whenever curves fall behind. That starves A2F, which then emits digital silence — a measured 938ms run of exact zeros mid-speech. This flag was the original audio dropout. |
-| `bGodfreyDeferEndAudioSamplesForCurveCatchUp` | `True` | With deferral off, `EndAudioSamples` fires at HTTP drain with a 11–21s backlog and blocks the game thread for 2–4 seconds at the start of speech. Deferral lets the backlog shrink first. |
+| `bGodfreyDeferEndAudioSamplesForCurveCatchUp` | `True` | With deferral off, `EndAudioSamples` fires at HTTP drain with a 11–21s backlog and blocks the game thread for 2–4 seconds at the start of speech. Deferral lets the backlog shrink first. Do **not** treat A2F’s ~0.9s unmatched floor as “caught up” while the playhead is still mid-utterance (Welcome HTTP burst used to hitch the intro). |
 | `GodfreyAceEndAudioMaxUnmatchedSeconds` | `0.9` | Just above the ~0.88s withholding floor, so the wait ends naturally rather than by timeout. Lower values are unreachable; higher values cost a proportionally longer flush. |
 | `GodfreyAceEndAudioCatchUpTimeoutSeconds` | `3` | Legacy short timeout. **Long utterances** no longer force `EndAudioSamples` after 3s while unmatched is still large mid-speech (that caused multi-second game-thread freezes on occasion speeches). UE waits for natural catch-up, then **flushes once Wall has played all sent PCM** (any length). 120s is only a stall deadline. |
-| `GodfreyAceIngestStallTimeoutSeconds` | `2.5` | After playback has caught sent PCM, if HTTP is still open and no new samples arrive, Unreal FinishStreams. Prevents silent lip-sync when Brain/TTS hangs. Must stay above a normal mid-reply TTS gap. |
+| `GodfreyAceIngestStallTimeoutSeconds` | `6.0` | After playback has caught sent PCM, if HTTP is still open and no new samples **or HTTP body bytes** arrive, Unreal FinishStreams. Prevents silent lip-sync when Brain/TTS hangs. Must stay above a pipelined ElevenLabs flush of the closing sentence (2.5s clipped the tail). |
 | `AceMaxPcmPushChunkDurationMs` | `55.0` | Audio per `AnimateFromAudioSamples` call. |
 | `[/Script/ACECore.ACESettings] BurstMode` | `ForceBurstMode` | See dead ends. Real-time mode makes `AnimateFromAudioSamples` blocking and collapses the editor to 3 FPS. |
 | `bApplyAceBurstInferenceOverrideAtStartup` | `True` | Applies the above at startup. |
@@ -104,7 +104,7 @@ been out to sea." Brain/TTS hung after ~6.5s of PCM (last heard: "how it feels")
 completed, so the watchdog still refused to end (`bFinished=0`). ACE audio stopped; speaking
 body AS chained to a 32s describing montage, which looked like continued lip-sync. After
 playback has caught sent PCM, if no further samples arrive for
-`GodfreyAceIngestStallTimeoutSeconds` (2.5s), Unreal cancels the hung POST and FinishStream.
+`GodfreyAceIngestStallTimeoutSeconds` (6s), Unreal cancels the hung POST and FinishStream.
 Brain pipeline also aborts an idle LLM stream after 8s and flushes TTS.
 
 **Short-reply EndAudioSamples deadlock** — 2026-08-19 Marcia given-name turn (`utt-23`,
@@ -129,7 +129,8 @@ Webcam on-open no longer dumps 200+ WMF formats at Log.
 
 **Tail safety margin** — `SentAudioTailMarginSec = 0.03f`.
 The watchdog previously allowed muting up to 80ms early, clipping the last word. All
-completion conditions now require `Wall >= ExpectedFromSamples + 0.03s`.
+completion conditions now require `Wall >= ExpectedFromSamples + 0.03s`. Last-voice
+viseme rest no longer `Stop()`s ACE 0.18s early (that clipped “Thank you, Fred”).
 
 **Lip-sync after audio** — muting `ACE Volume` on playback-complete left blendshapes
 running (A2F flush / unmatched tail). Playback-complete now `Stop()`s the curve source
@@ -209,7 +210,7 @@ What good looks like:
 - `EndAudioSamples returned wall=` around 165ms, reached via Wall catching Sent (or the 0.9s unmatched gate), not a 60s stall.
 - No `Still deferring EndAudioSamples` lines repeating after Wall ≥ Sent.
 - After a short reply, `ACE playback complete` then `listening window open (Speak)` — lantern green.
-- No `ingest stall while HTTP still open` unless Brain/TTS actually hung (utt-8 class).
+- No `ingest stall while HTTP still open` unless Brain/TTS actually hung (utt-8 class). After HTTP drain, stall must stay silent while EndAudioSamples is deferred.
 
 Related diagnostics: `Godfrey.RecordAudio 1` / `Godfrey.RecordAudio 0` captures the master
 submix to WAV (run the `0` while PIE is still active or nothing is written). Useful for

@@ -126,6 +126,9 @@ public:
 	void SetCurrentAnimationName(const FString& AnimName);
 
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Diagnostics")
+	void SetCurrentAnimationContext(const FString& ContextName);
+
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Diagnostics")
 	void SetQueueLength(int32 Length);
 
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Diagnostics")
@@ -136,6 +139,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Diagnostics")
 	FString GetCurrentAnimationName() const { return CurrentAnimationName; }
+
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Diagnostics")
+	FString GetCurrentAnimationContext() const { return CurrentAnimationContext; }
 
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Diagnostics")
 	int32 GetQueueLength() const { return QueueLength; }
@@ -160,6 +166,7 @@ private:
 
 	FString BehaviourStateName = TEXT("Idle");
 	FString CurrentAnimationName = TEXT("(none)");
+	FString CurrentAnimationContext;
 	FString CurrentEmotionName = TEXT("(reserved)");
 	int32 QueueLength = 0;
 	float SpeechLatencyMs = -1.f;

@@ -8,6 +8,7 @@
 #include "GodfreyExhibitionQueuePollComponent.h"
 #include "GodfreyVisitorPresenceComponent.h"
 #include "GodfreyVoiceInputComponent.h"
+#include "GodfreyRuntimePerfHudComponent.h"
 #include "UnrealPerformerGodfreySettings.h"
 #include "Animation/AnimCurveTypes.h"
 #include "Animation/AnimData/IAnimationDataModel.h"
@@ -20,6 +21,9 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "ChaosClothAsset/ClothComponent.h"
+#include "ChaosClothAsset/ClothAssetBase.h"
+#include "PhysicsEngine/PhysicsAsset.h"
 #include "Engine/DataTable.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/Engine.h"
@@ -387,6 +391,83 @@ static FString ResolveGazeSafeActionStem(const FString& Stem)
 /** One anim-sequence cycle per dynamic speaking montage; section loop + tick rewind sustain speech. */
 static constexpr int32 GodfreySpeakingIdleSegmentLoopCount = 1;
 static constexpr float GestureIntensityDefault = 1.f;
+
+static const TCHAR* GodfreyPrioritySpeakingStems[] = {
+	TEXT("Explaining_01"),
+	TEXT("Explaining_02"),
+	TEXT("ExplainingFirmly_01"),
+	TEXT("DescribingWhere_01"),
+	TEXT("WantingToBeUnderstood_01"),
+	TEXT("SummingUpHisCase_01"),
+};
+static constexpr int32 GodfreyPrioritySpeakingStemCount = UE_ARRAY_COUNT(GodfreyPrioritySpeakingStems);
+static constexpr int32 GodfreyPrioritySpeakingWeight = 3;
+
+static const TCHAR* GodfreyPriorityGreetingStems[] = {
+	TEXT("GreetingWelcome_03"),
+};
+static constexpr int32 GodfreyPriorityGreetingStemCount = UE_ARRAY_COUNT(GodfreyPriorityGreetingStems);
+static constexpr int32 GodfreyPriorityGreetingWeight = 3;
+
+/** Takes with bind-pose / A-frame arms — keep on disk, do not auto-play. */
+static bool GodfreyIsShelvedAPoseStem(const FString& Stem)
+{
+	return Stem.Equals(TEXT("WantingYouToHear_01"), ESearchCase::IgnoreCase)
+		|| Stem.Equals(TEXT("GreetingWelcome_02"), ESearchCase::IgnoreCase);
+}
+
+static void GodfreyInjectStems(TArray<FString>& Pool, const TCHAR* const* Stems, int32 Count)
+{
+	for (int32 i = 0; i < Count; ++i)
+	{
+		Pool.AddUnique(FString(Stems[i]));
+	}
+}
+
+static void GodfreyWeightedShuffleDeck(
+	const TArray<FString>& UniqueStems,
+	const TCHAR* const* PriorityStems,
+	int32 PriorityCount,
+	int32 PriorityWeight,
+	const FString& LastStem,
+	TArray<FString>& OutOrder)
+{
+	TArray<FString> Weighted;
+	Weighted.Reserve(UniqueStems.Num() * FMath::Max(1, PriorityWeight));
+	for (const FString& S : UniqueStems)
+	{
+		int32 Weight = 1;
+		for (int32 i = 0; i < PriorityCount; ++i)
+		{
+			if (S.Equals(PriorityStems[i], ESearchCase::IgnoreCase))
+			{
+				Weight = PriorityWeight;
+				break;
+			}
+		}
+		for (int32 k = 0; k < Weight; ++k)
+		{
+			Weighted.Add(S);
+		}
+	}
+	for (int32 i = Weighted.Num() - 1; i > 0; --i)
+	{
+		Weighted.Swap(i, FMath::RandRange(0, i));
+	}
+	if (Weighted.Num() > 1 && !LastStem.IsEmpty()
+		&& Weighted[0].Equals(LastStem, ESearchCase::IgnoreCase))
+	{
+		for (int32 i = 1; i < Weighted.Num(); ++i)
+		{
+			if (!Weighted[i].Equals(LastStem, ESearchCase::IgnoreCase))
+			{
+				Weighted.Swap(0, i);
+				break;
+			}
+		}
+	}
+	OutOrder = MoveTemp(Weighted);
+}
 
 float GetSpeakingIdleMontageBlendOut()
 {
@@ -1513,7 +1594,14 @@ void UGodfreyPerformerAnimationBridgeComponent::DeferredMetaHumanClothingRefresh
 	}
 
 	++MetaHumanClothingRefreshPassCount;
-	PinClothingToSkinnedPose();
+	if (bPinClothingToSkinnedPose)
+	{
+		PinClothingToSkinnedPose();
+	}
+	else
+	{
+		EnableCoatClothSimulation();
+	}
 
 	// MetaHumanComponentUE::BeginPlay runs after this component and resets OnlyTickPoseWhenRendered.
 	if (ShouldManageMetaHumanGarmentsAtRuntime() && HasMetaHumanGarmentPostProcessMesh())
@@ -2089,6 +2177,263 @@ void UGodfreyPerformerAnimationBridgeComponent::ScheduleClothingSkinnedPosePin()
 		0.25f,
 		true);
 	PinClothingToSkinnedPose();
+}
+
+UChaosClothComponent* UGodfreyPerformerAnimationBridgeComponent::EnsureGodfreyCoatClothComponent()
+{
+	AActor* const Owner = GetOwner();
+	if (!Owner)
+	{
+		return nullptr;
+	}
+
+	if (UChaosClothComponent* const Existing = Owner->FindComponentByClass<UChaosClothComponent>())
+	{
+		return Existing;
+	}
+
+	const UUnrealPerformerGodfreySettings* const Settings = GetDefault<UUnrealPerformerGodfreySettings>();
+	TArray<FSoftObjectPath> Candidates;
+	if (Settings && Settings->GodfreyCoatClothAsset.IsValid())
+	{
+		Candidates.Add(Settings->GodfreyCoatClothAsset);
+	}
+	Candidates.Add(FSoftObjectPath(TEXT("/Game/Outfits/OA_Casual_formal.OA_Casual_formal")));
+	Candidates.Add(FSoftObjectPath(TEXT("/Game/Outfits/casual_formal/ClothAssets/CA_a.CA_a")));
+	Candidates.Add(FSoftObjectPath(TEXT("/Game/Outfits/casual_formal/ClothAssets/CA_b.CA_b")));
+
+	UChaosClothAssetBase* ClothAsset = nullptr;
+	FString LoadedPath;
+	for (const FSoftObjectPath& Path : Candidates)
+	{
+		if (!Path.IsValid())
+		{
+			continue;
+		}
+		if (UChaosClothAssetBase* const Loaded = Cast<UChaosClothAssetBase>(Path.TryLoad()))
+		{
+			ClothAsset = Loaded;
+			LoadedPath = Path.ToString();
+			break;
+		}
+	}
+
+	if (!ClothAsset)
+	{
+		UE_LOG(LogGodfreyPerformance, Warning,
+			TEXT("GodfreyPerformerBridge: coat cloth asset missing (tried OA_Casual_formal / CA_a / CA_b). Assembled outfit mesh has no clothing data."));
+		return nullptr;
+	}
+
+	USkeletalMeshComponent* const Body = TargetSkeletalMesh;
+	UChaosClothComponent* const Cloth = NewObject<UChaosClothComponent>(Owner, FName(TEXT("GodfreyCoatCloth")));
+	if (!Cloth)
+	{
+		return nullptr;
+	}
+
+	Cloth->SetAsset(ClothAsset);
+	Cloth->SetEnableSimulation(true);
+	Cloth->SetBindToLeaderComponent(true);
+	if (IsValid(Body))
+	{
+		Cloth->SetupAttachment(Body);
+		Cloth->SetLeaderPoseComponent(Body, true, true);
+	}
+	Owner->AddInstanceComponent(Cloth);
+	Cloth->RegisterComponent();
+
+	TArray<USkeletalMeshComponent*> OutfitMeshes;
+	Owner->GetComponents<USkeletalMeshComponent>(OutfitMeshes);
+	for (USkeletalMeshComponent* const Skel : OutfitMeshes)
+	{
+		if (!IsValid(Skel) || Skel == Body)
+		{
+			continue;
+		}
+		const FString LowerName = Skel->GetName().ToLower();
+		if (LowerName.Contains(TEXT("face")) || LowerName.Contains(TEXT("hair")))
+		{
+			continue;
+		}
+		if (Skel->LeaderPoseComponent.Get() == Body)
+		{
+			Skel->SetHiddenInGame(true, true);
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformerBridge: hiding rigid outfit mesh '%s' (%s) — Chaos cloth is the costume."),
+				*Skel->GetName(),
+				Skel->GetSkeletalMeshAsset() ? *Skel->GetSkeletalMeshAsset()->GetName() : TEXT("none"));
+		}
+	}
+
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: spawned ChaosCloth '%s' from '%s' bound to Body."),
+		*Cloth->GetName(), *LoadedPath);
+	return Cloth;
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::EnableCoatClothSimulation()
+{
+	const UUnrealPerformerGodfreySettings* const Settings = GetDefault<UUnrealPerformerGodfreySettings>();
+	if (!Settings || !Settings->bGodfreyCoatClothSimulation)
+	{
+		return;
+	}
+
+	AActor* const Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* const Body = TargetSkeletalMesh;
+	UPhysicsAsset* const BodyPhys = IsValid(Body) ? Body->GetPhysicsAsset() : nullptr;
+	const float MaxDistScale = FMath::Clamp(Settings->GodfreyCoatClothMaxDistanceScale, 0.15f, 1.f);
+
+	EnsureGodfreyCoatClothComponent();
+
+	if (ClothingSkinnedPosePinPassCount <= 1)
+	{
+		TArray<UActorComponent*> Inventory;
+		Owner->GetComponents(Inventory);
+		for (UActorComponent* const Comp : Inventory)
+		{
+			if (!IsValid(Comp))
+			{
+				continue;
+			}
+			const USkeletalMeshComponent* const Skel = Cast<USkeletalMeshComponent>(Comp);
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformerBridge: coat cloth inventory '%s' class=%s skel=%s clothAssets=%d disableSim=%d leader=%s"),
+				*Comp->GetName(),
+				*Comp->GetClass()->GetName(),
+				Skel && Skel->GetSkeletalMeshAsset() ? *Skel->GetSkeletalMeshAsset()->GetName() : TEXT("-"),
+				Skel && Skel->GetSkeletalMeshAsset() && Skel->GetSkeletalMeshAsset()->HasActiveClothingAssets() ? 1 : 0,
+				Skel ? (Skel->bDisableClothSimulation ? 1 : 0) : -1,
+				Skel && Skel->LeaderPoseComponent.Get() ? *Skel->LeaderPoseComponent->GetName() : TEXT("-"));
+		}
+	}
+
+	int32 SkelEnabled = 0;
+	int32 ChaosEnabled = 0;
+	int32 CollisionSources = 0;
+
+	TArray<UActorComponent*> Components;
+	Owner->GetComponents(Components);
+	for (UActorComponent* const Comp : Components)
+	{
+		if (!IsValid(Comp))
+		{
+			continue;
+		}
+
+		const FString LowerName = Comp->GetName().ToLower();
+		if (LowerName.Contains(TEXT("face"))
+			|| LowerName.Contains(TEXT("hair"))
+			|| LowerName.Contains(TEXT("groom"))
+			|| LowerName.Contains(TEXT("beard"))
+			|| LowerName.Contains(TEXT("brow"))
+			|| LowerName.Contains(TEXT("lash"))
+			|| LowerName.Contains(TEXT("lodsync")))
+		{
+			continue;
+		}
+
+		if (UChaosClothComponent* const Cloth = Cast<UChaosClothComponent>(Comp))
+		{
+			const bool bWasSimulating = Cloth->IsSimulationEnabled();
+			Cloth->SetEnableSimulation(true);
+			Cloth->ResumeSimulation();
+			if (IsValid(Body) && BodyPhys)
+			{
+				Cloth->AddCollisionSource(Body, BodyPhys, true);
+				++CollisionSources;
+			}
+			if (!bWasSimulating)
+			{
+				Cloth->RecreateClothSimulationProxy();
+				Cloth->ForceNextUpdateTeleportAndReset();
+			}
+			++ChaosEnabled;
+			continue;
+		}
+
+		USkeletalMeshComponent* const Skel = Cast<USkeletalMeshComponent>(Comp);
+		if (!Skel || Skel == Body)
+		{
+			continue;
+		}
+
+		USkeletalMesh* const Mesh = Skel->GetSkeletalMeshAsset();
+		const bool bHasClothing = Mesh && Mesh->HasActiveClothingAssets();
+		if (!bHasClothing)
+		{
+			continue;
+		}
+
+		if (Skel->bDisableClothSimulation
+			|| Skel->ClothBlendWeight < 0.99f
+			|| !Skel->GetAllowClothActors()
+			|| !FMath::IsNearlyEqual(Skel->ClothMaxDistanceScale, MaxDistScale))
+		{
+			Skel->bDisableClothSimulation = false;
+			Skel->ClothBlendWeight = 1.f;
+			Skel->SetClothMaxDistanceScale(MaxDistScale);
+			Skel->SetAllowClothActors(true);
+			Skel->ResetClothTeleportMode();
+			Skel->ForceClothNextUpdateTeleportAndReset();
+			++SkelEnabled;
+		}
+
+		if (IsValid(Body) && BodyPhys)
+		{
+			Skel->AddClothCollisionSource(Body, BodyPhys);
+		}
+	}
+
+	if (SkelEnabled > 0 || ChaosEnabled > 0)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: coat cloth sim on (skel=%d chaos=%d collision source=Body count=%d maxDist=%.2f pass=%d bodyPhys=%d)."),
+			SkelEnabled, ChaosEnabled, CollisionSources, MaxDistScale, ClothingSkinnedPosePinPassCount,
+			BodyPhys ? 1 : 0);
+	}
+	else if (ClothingSkinnedPosePinPassCount <= 1)
+	{
+		UE_LOG(LogGodfreyPerformance, Warning,
+			TEXT("GodfreyPerformerBridge: coat cloth sim requested but no cloth components found yet (bodyPhys=%d)."),
+			BodyPhys ? 1 : 0);
+	}
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::TickCoatClothEnable()
+{
+	++ClothingSkinnedPosePinPassCount;
+	EnableCoatClothSimulation();
+	if (ClothingSkinnedPosePinPassCount >= 8)
+	{
+		if (UWorld* const World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(ClothingSkinnedPosePinTimerHandle);
+		}
+	}
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::ScheduleCoatClothEnable()
+{
+	UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	ClothingSkinnedPosePinPassCount = 0;
+	World->GetTimerManager().SetTimer(
+		ClothingSkinnedPosePinTimerHandle,
+		FTimerDelegate::CreateUObject(this, &UGodfreyPerformerAnimationBridgeComponent::TickCoatClothEnable),
+		0.25f,
+		true);
+	EnableCoatClothSimulation();
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::StabilizeEditorTorsoOnViewportChange()
@@ -2688,6 +3033,11 @@ void UGodfreyPerformerAnimationBridgeComponent::BeginPlay()
 	SpeakingIdleMontageWallCycleSeconds = 0.f;
 	SpeakingIdleCycleStartWorldTime = -1.0;
 
+	if (const UUnrealPerformerGodfreySettings* Settings = GetDefault<UUnrealPerformerGodfreySettings>())
+	{
+		bPreferEyeFixedLibraryVariants = Settings->bGodfreyPreferEyeFixedLibraryVariants;
+	}
+
 	UE_LOG(LogGodfreyPerformance, Log,
 		TEXT("GodfreyPerformerBridge: BeginPlay preferEyeFixed=%d library='%s'."),
 		bPreferEyeFixedLibraryVariants ? 1 : 0,
@@ -2712,6 +3062,20 @@ void UGodfreyPerformerAnimationBridgeComponent::BeginPlay()
 	{
 		CachedExhibitYawDegrees = Owner->GetActorRotation().Yaw;
 		bHasCachedExhibitYaw = true;
+#if !UE_BUILD_SHIPPING
+		if (const UUnrealPerformerGodfreySettings* HudSettings = GetDefault<UUnrealPerformerGodfreySettings>())
+		{
+			if (HudSettings->bGodfreyShowRuntimePerfHud || HudSettings->bGodfreyShowCurrentAnimHud)
+			{
+				if (!Owner->FindComponentByClass<UGodfreyRuntimePerfHudComponent>())
+				{
+					UGodfreyRuntimePerfHudComponent* Hud =
+						NewObject<UGodfreyRuntimePerfHudComponent>(Owner, TEXT("GodfreyRuntimePerfHud"));
+					Hud->RegisterComponent();
+				}
+			}
+		}
+#endif
 	}
 	bFacingOffsetCalibrated = false;
 
@@ -2762,7 +3126,16 @@ void UGodfreyPerformerAnimationBridgeComponent::BeginPlay()
 
 		MaybeLogMetaHumanShirtDiagnostics(TEXT("BeginPlay"), true);
 
-	ScheduleClothingSkinnedPosePin();
+	const UUnrealPerformerGodfreySettings* const Costume = GetDefault<UUnrealPerformerGodfreySettings>();
+	if (Costume && Costume->bGodfreyCoatClothSimulation)
+	{
+		bPinClothingToSkinnedPose = false;
+		ScheduleCoatClothEnable();
+	}
+	else
+	{
+		ScheduleClothingSkinnedPosePin();
+	}
 
 	if (bKeepBodyMeshVisible || bDebugForceBodyMeshVisibleAtBeginPlay)
 	{
@@ -5247,9 +5620,21 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 
 	if (PlayLength > KINDA_SMALL_NUMBER)
 	{
+		const bool bPublishDebugAnim = ContextLabel
+			&& FCString::Stricmp(ContextLabel, TEXT("IdleBreath")) != 0
+			&& FCString::Stricmp(ContextLabel, TEXT("PostSpeechSettle")) != 0;
+		if (bPublishDebugAnim)
+		{
+			LastDebugPlayContextName = ContextLabel;
+			LastDebugPlaySequenceName = PlaySeq ? PlaySeq->GetName() : PlayMontage->GetName();
+		}
 		if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
 		{
-			Diag->SetCurrentAnimationName(PlayMontage->GetName());
+			if (bPublishDebugAnim)
+			{
+				Diag->SetCurrentAnimationName(LastDebugPlaySequenceName);
+				Diag->SetCurrentAnimationContext(LastDebugPlayContextName);
+			}
 			Diag->MarkStageForCurrent(EGodfreyUtteranceStage::BodyAnimStarted);
 		}
 	}
@@ -5345,6 +5730,44 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 	}
 
 	return PlayLength > KINDA_SMALL_NUMBER;
+}
+
+FString UGodfreyPerformerAnimationBridgeComponent::GetDebugPlayingSequenceName() const
+{
+	if (UAnimInstance* const AnimInst = ResolveAnimInstance(TEXT("DebugHud")))
+	{
+		auto NameFromMontage = [](const UAnimMontage* Montage) -> FString
+		{
+			if (const UAnimSequence* Seq = ExtractPrimarySequenceFromMontage(Montage))
+			{
+				return Seq->GetName();
+			}
+			return Montage ? Montage->GetName() : FString();
+		};
+
+		if (ActiveSpeakingIdlePlayMontage && AnimInst->Montage_IsActive(ActiveSpeakingIdlePlayMontage))
+		{
+			const FString Live = NameFromMontage(ActiveSpeakingIdlePlayMontage);
+			if (!Live.IsEmpty())
+			{
+				return Live;
+			}
+		}
+		if (ActiveTravelMontage && AnimInst->Montage_IsActive(ActiveTravelMontage))
+		{
+			const FString Live = NameFromMontage(ActiveTravelMontage);
+			if (!Live.IsEmpty())
+			{
+				return Live;
+			}
+		}
+	}
+	return LastDebugPlaySequenceName.IsEmpty() ? TEXT("(none)") : LastDebugPlaySequenceName;
+}
+
+FString UGodfreyPerformerAnimationBridgeComponent::GetDebugPlayingContextName() const
+{
+	return LastDebugPlayContextName;
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::StopIdleBreathingMontageIfActive()
@@ -5968,26 +6391,32 @@ UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::PickListeningMontageFro
 
 void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultSpeakingPool()
 {
-	if (SpeakingIdlePool.Num() > 0)
+	if (SpeakingIdlePool.Num() == 0)
 	{
-		return;
+		// Expansive speaking body: newer Explaining/plea takes first, then Describing* + Speaking* (R14).
+		SpeakingIdlePool = {
+			TEXT("Explaining_01"),
+			TEXT("Explaining_02"),
+			TEXT("ExplainingFirmly_01"),
+			TEXT("DescribingWhere_01"),
+			TEXT("WantingToBeUnderstood_01"),
+			TEXT("SummingUpHisCase_01"),
+			TEXT("SpeakingCalmExplanation_01"),
+			TEXT("SpeakingGentleEmphasis_01"),
+			TEXT("SpeakingDescribeDistance_01"),
+			TEXT("SpeakingDescribeSequence_01"),
+			TEXT("SpeakingDescribeSize_01"),
+			TEXT("SpeakingExplainDanger_01"),
+			TEXT("DescribingTheGeorgette_01"),
+			TEXT("DescribingWereYouAfraid_01"),
+			TEXT("DescribingWereYouAfraid_02"),
+			TEXT("DescribingWhatGraceBusselWasLike_01"),
+			TEXT("DescribingWhatHappenedThatNight_01"),
+			TEXT("DescribingWhatVisitorsShouldRemember_01"),
+			TEXT("DescribingWhatYouWouldDoDifferently_01"),
+		};
 	}
-	// Expansive speaking body: Describing* + SpeakingDescribe*/Explain* + calm/emphasis (R14).
-	SpeakingIdlePool = {
-		TEXT("SpeakingCalmExplanation_01"),
-		TEXT("SpeakingGentleEmphasis_01"),
-		TEXT("SpeakingDescribeDistance_01"),
-		TEXT("SpeakingDescribeSequence_01"),
-		TEXT("SpeakingDescribeSize_01"),
-		TEXT("SpeakingExplainDanger_01"),
-		TEXT("DescribingTheGeorgette_01"),
-		TEXT("DescribingWereYouAfraid_01"),
-		TEXT("DescribingWereYouAfraid_02"),
-		TEXT("DescribingWhatGraceBusselWasLike_01"),
-		TEXT("DescribingWhatHappenedThatNight_01"),
-		TEXT("DescribingWhatVisitorsShouldRemember_01"),
-		TEXT("DescribingWhatYouWouldDoDifferently_01"),
-	};
+	GodfreyInjectStems(SpeakingIdlePool, GodfreyPrioritySpeakingStems, GodfreyPrioritySpeakingStemCount);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::ReshuffleSpeakingPoolOrder()
@@ -6003,7 +6432,7 @@ void UGodfreyPerformerAnimationBridgeComponent::ReshuffleSpeakingPoolOrder()
 		{
 			S.RightChopInline(3);
 		}
-		if (!S.IsEmpty())
+		if (!S.IsEmpty() && !GodfreyIsShelvedAPoseStem(S))
 		{
 			Clean.AddUnique(S);
 		}
@@ -6015,19 +6444,13 @@ void UGodfreyPerformerAnimationBridgeComponent::ReshuffleSpeakingPoolOrder()
 		return;
 	}
 
-	for (int32 i = Clean.Num() - 1; i > 0; --i)
-	{
-		const int32 j = FMath::RandRange(0, i);
-		Clean.Swap(i, j);
-	}
-
-	if (Clean.Num() > 1 && !LastSpeakingPoolStem.IsEmpty()
-		&& Clean[0].Equals(LastSpeakingPoolStem, ESearchCase::IgnoreCase))
-	{
-		Clean.Swap(0, Clean.Num() - 1);
-	}
-
-	ShuffledSpeakingPoolOrder = MoveTemp(Clean);
+	GodfreyWeightedShuffleDeck(
+		Clean,
+		GodfreyPrioritySpeakingStems,
+		GodfreyPrioritySpeakingStemCount,
+		GodfreyPrioritySpeakingWeight,
+		LastSpeakingPoolStem,
+		ShuffledSpeakingPoolOrder);
 	NextSpeakingPoolIndex = 0;
 
 	FString OrderLog;
@@ -6095,17 +6518,18 @@ bool UGodfreyPerformerAnimationBridgeComponent::IsSpeakingPoolActive() const
 
 void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultDialogGreetingPool()
 {
-	if (DialogGreetingPool.Num() > 0)
+	if (DialogGreetingPool.Num() == 0)
 	{
-		return;
+		// First dialog interaction (R15). Prefer newer Welcome_02/03. TurnToVisitor excluded.
+		DialogGreetingPool = {
+			TEXT("GreetingWelcome_03"),
+			TEXT("GreetingWelcome_01"),
+			TEXT("GreetingNod_01"),
+			TEXT("GreetingSmallSmile_01"),
+			TEXT("GreetingHaveASeat_01"),
+		};
 	}
-	// First dialog interaction (R15). TurnToVisitor excluded — camera already frontal (see bSkipEngageTurnMontage).
-	DialogGreetingPool = {
-		TEXT("GreetingNod_01"),
-		TEXT("GreetingSmallSmile_01"),
-		TEXT("GreetingHaveASeat_01"),
-		TEXT("GreetingWelcome_01"),
-	};
+	GodfreyInjectStems(DialogGreetingPool, GodfreyPriorityGreetingStems, GodfreyPriorityGreetingStemCount);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::ReshuffleDialogGreetingPoolOrder()
@@ -6121,7 +6545,7 @@ void UGodfreyPerformerAnimationBridgeComponent::ReshuffleDialogGreetingPoolOrder
 		{
 			S.RightChopInline(3);
 		}
-		if (!S.IsEmpty())
+		if (!S.IsEmpty() && !GodfreyIsShelvedAPoseStem(S))
 		{
 			Clean.AddUnique(S);
 		}
@@ -6133,19 +6557,13 @@ void UGodfreyPerformerAnimationBridgeComponent::ReshuffleDialogGreetingPoolOrder
 		return;
 	}
 
-	for (int32 i = Clean.Num() - 1; i > 0; --i)
-	{
-		const int32 j = FMath::RandRange(0, i);
-		Clean.Swap(i, j);
-	}
-
-	if (Clean.Num() > 1 && !LastDialogGreetingStem.IsEmpty()
-		&& Clean[0].Equals(LastDialogGreetingStem, ESearchCase::IgnoreCase))
-	{
-		Clean.Swap(0, Clean.Num() - 1);
-	}
-
-	ShuffledDialogGreetingPoolOrder = MoveTemp(Clean);
+	GodfreyWeightedShuffleDeck(
+		Clean,
+		GodfreyPriorityGreetingStems,
+		GodfreyPriorityGreetingStemCount,
+		GodfreyPriorityGreetingWeight,
+		LastDialogGreetingStem,
+		ShuffledDialogGreetingPoolOrder);
 	NextDialogGreetingPoolIndex = 0;
 
 	FString OrderLog;
@@ -7302,10 +7720,33 @@ void UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterTurn()
 		AdvanceEngageAfterGreet();
 		return;
 	}
-	UAnimMontage* const Greet = ResolvePresenceMontageSlot(EngageGreetMontage, DefaultEngageGreetSequence, TEXT("EngageGreet"), 1);
+	UAnimMontage* const Greet = PickPresenceWelcomeMontage();
 	PlayPresenceMontageChainStep(Greet, TEXT("EngageGreet"), EngageChainTimerHandle,
 		FTimerDelegate::CreateUObject(this, &UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterGreet),
 		2.5f);
+}
+
+UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::PickPresenceWelcomeMontage()
+{
+	TArray<FString> WelcomeStems = {
+		TEXT("GreetingWelcome_03"),
+		TEXT("GreetingWelcome_01"),
+	};
+	for (const FString& Stem : WelcomeStems)
+	{
+		if (UAnimSequence* Seq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(Stem)))
+		{
+			UAnimMontage* const Built = MakeOrGetPlaceholderMontage(Seq, TEXT("EngageGreet"), 1);
+			if (Built)
+			{
+				UE_LOG(LogGodfreyPerformance, Log,
+					TEXT("GodfreyPerformerBridge: presence Welcome '%s'."),
+					*Stem);
+				return Built;
+			}
+		}
+	}
+	return ResolvePresenceMontageSlot(EngageGreetMontage, DefaultEngageGreetSequence, TEXT("EngageGreet"), 1);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterGreet()

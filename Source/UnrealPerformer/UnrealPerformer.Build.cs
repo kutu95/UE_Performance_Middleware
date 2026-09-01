@@ -31,6 +31,8 @@ public class UnrealPerformer : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"AssetRegistry",
+			"ChaosClothAssetEngine",
+			"ChaosOutfitAssetEngine",
 			"MetaHumanSDKRuntime",
 			"Sockets",
 			"Networking",

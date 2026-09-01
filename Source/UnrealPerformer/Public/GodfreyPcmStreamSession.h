@@ -71,6 +71,9 @@ public:
 
 	/** Called when the first HTTP body bytes reach the game-thread PCM pipeline (first FIFO batch). */
 	void NotifyFirstHttpBodyBytesPlatformSeconds(double PlatformSeconds);
+	void NotifyHttpBodyProgress();
+	/** HTTP response finished; remaining work is playhead catch-up, not a hung ingest. */
+	void NotifyHttpReceiveComplete();
 
 	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
 	int32 GetBufferedPcmBytes() const { return RollingPcmBytes.Num(); }
@@ -87,6 +90,9 @@ public:
 	/** ACE procedural playback wall clock (-1 if unavailable). */
 	float GetPlaybackWallSeconds() const;
 
+	/** Seconds through the last voiced PCM window (0 if unknown). Trailing hush is not included. */
+	float GetLastVoiceAudioSeconds() const;
+
 	/**
 	 * True while ACE is playing and curves lag sent audio enough that EndAudioSamples would hitch.
 	 * Caller should keep polling until false (or timeout) before FinishStream.
@@ -95,7 +101,7 @@ public:
 
 	/**
 	 * After HTTP drain, force EndAudioSamples once audible playback has caught sent PCM
-	 * (any length), or near the end of a long occasion, or at the 120s stall deadline.
+	 * (any length), or after last voice plus a short hush, or at the 120s stall deadline.
 	 * Never force mid-speech with tens of seconds unmatched — that blocks the game thread.
 	 */
 	bool ShouldForceEndAudioSamplesDespiteCatchUpLag(float CatchUpElapsedSeconds) const;
@@ -215,6 +221,7 @@ private:
 	int32 StreamNumChannels = 0;
 	int64 TotalSamplesSentToAce = 0;
 	double LastSamplePushPlatformSeconds = -1.0;
+	double LastHttpBodyProgressPlatformSeconds = -1.0;
 	float LastObservedMaxCurveTs = -1.f;
 	double MaxCurveTsLastChangePlatformSeconds = -1.0;
 	/** Highest procedural playback wall clock seen; ACE reports -1 once playback stops. */
@@ -230,6 +237,7 @@ private:
 	bool bLoggedAceFaceParamsThisUtterance = false;
 	bool bLoggedAceRestPoseThisUtterance = false;
 	bool bBroadcastIngestStallThisUtterance = false;
+	bool bHttpReceiveCompleted = false;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UAudio2FaceParameters> AceFaceParameters;

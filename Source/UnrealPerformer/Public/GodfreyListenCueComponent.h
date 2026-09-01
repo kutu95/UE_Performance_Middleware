@@ -35,6 +35,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue")
 	bool bShowLabels = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (MultiLine = "true"))
+	FString SpeakWhileWaitWarningText = TEXT("He cannot hear you. Speak only when the lantern is green.");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "10", ClampMax = "28"))
+	float WarningFontSize = 16.f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Listen Cue", meta = (ClampMin = "48", ClampMax = "256"))
 	float LanternSize = 144.f;
 
@@ -50,11 +56,12 @@ public:
 private:
 	void EnsureOverlay();
 	void TearDownOverlay();
-	void UpdateCueVisual(bool bCanSpeak);
+	void UpdateCueVisual(bool bCanSpeak, bool bSpeakWhileWaitWarning);
 	bool ResolveCanVisitorSpeak() const;
+	bool ResolveSpeakWhileWaitWarning() const;
 	UGodfreyVoiceInputComponent* ResolveVoiceInput() const;
 	UTexture2D* LoadPngTexture(const FString& AbsolutePath, const TCHAR* ObjectName);
-	FSlateFontInfo MakePeriodLabelFont() const;
+	FSlateFontInfo MakePeriodLabelFont(float Size) const;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture2D> SpeakLanternTexture;
@@ -65,11 +72,13 @@ private:
 	TSharedPtr<SOverlay> OverlayWidget;
 	TSharedPtr<SImage> LanternImage;
 	TSharedPtr<STextBlock> LabelText;
+	TSharedPtr<STextBlock> WarningText;
 	TSharedPtr<SBorder> BackingBorder;
 	TSharedPtr<FSlateColorBrush> BackingBrush;
 	FSlateBrush SpeakBrush;
 	FSlateBrush WaitBrush;
 	bool bOverlayAdded = false;
 	bool bLastCanSpeak = false;
+	bool bLastSpeakWhileWaitWarning = false;
 	bool bHasLastCanSpeak = false;
 };

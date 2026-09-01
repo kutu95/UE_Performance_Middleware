@@ -78,6 +78,17 @@ public:
 	void NotifyEncounterAbandonedWhileOccupied();
 
 	/**
+	 * R12 spoken goodbye while occupancy is still Present: wait PostFarewellSuccessorSeconds
+	 * for them to leave, then treat remaining occupancy (or visitor speech) as a new visitor.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Presence")
+	void NotifySpokenFarewellWhileOccupied();
+
+	/** Visitor speech_started after a spoken goodbye — skip the leave wait and Welcome. */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Presence")
+	void NotifyPostFarewellVisitorSpeech();
+
+	/**
 	 * True while webcam presence owns the first turn: Welcome not yet delivered this occupancy
 	 * (Empty, Approaching, Present during the arrival card). STT must not AskGodfrey.
 	 */
@@ -208,6 +219,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.5", ClampMax = "8.0"))
 	float AbandonedEmptyRecaptureDelaySeconds = 2.f;
 
+	/**
+	 * After a spoken goodbye (R12), wait this long for the visitor to leave.
+	 * If occupancy is still Present (or they speak), play the arrival card and Welcome.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float PostFarewellSuccessorSeconds = 3.f;
+
 	/** While Empty and unoccupied, recapture empty on this interval (daylight). 0 = off. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.0", ClampMax = "900.0"))
 	float PeriodicEmptyRefreshSeconds = 180.f;
@@ -281,6 +299,17 @@ private:
 	void BeginEmptyBackgroundCapture(const TCHAR* Reason, bool bResetSenseToEmpty);
 	void TickEmptyBaselineMaintenance(float DeltaTime);
 	void TickAbandonedEmptyRecapture(float DeltaTime);
+	void TickPostFarewellSuccessor(float DeltaTime);
+	void CancelPostFarewellSuccessor(const TCHAR* Reason);
+	void TryCompletePostFarewellSuccessor(const TCHAR* Reason);
+	void BeginSuccessorEncounter(const TCHAR* Reason);
+	bool IsOccupiedForSuccessor() const;
+	bool CanStartSuccessorWelcome() const;
+	void BindPerformerPresenceEvents();
+	UFUNCTION()
+	void HandleFarewellSequenceStarted();
+	UFUNCTION()
+	void HandleSeaIdleStartedForSuccessor();
 	float GetEmptyBackgroundAgeSeconds() const;
 	void SetSenseState(EGodfreyVisitorSenseState NewState);
 	void TryPresenceEngage();
@@ -343,6 +372,9 @@ private:
 	bool bBlockPresenceWelcomeUntilVacated = false;
 	bool bPresenceWelcomeDeliveredThisVisit = false;
 	bool bPendingAbandonedEmptyRecapture = false;
+	bool bPostFarewellSuccessorArmed = false;
+	bool bPostFarewellSpeechRequested = false;
+	bool bPerformerPresenceEventsBound = false;
 	int32 WebcamPlayRetryCount = 0;
 	int32 EmptyBackgroundFramesCaptured = 0;
 	float WebcamPlayRetryCountdown = 0.f;
@@ -356,6 +388,7 @@ private:
 	float EnterDwellRemaining = -1.f;
 	float LeaveDwellRemaining = -1.f;
 	float AbandonedEmptyRecaptureCountdown = -1.f;
+	float PostFarewellSuccessorCountdown = -1.f;
 	float ActivityRefreshCountdown = 0.f;
 	float OccupancyFraction = 0.f;
 	float MotionFraction = 0.f;

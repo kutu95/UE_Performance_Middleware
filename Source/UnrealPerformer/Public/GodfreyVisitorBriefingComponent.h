@@ -44,6 +44,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Briefing")
 	void NotifyZoneEmpty();
 
+	/** Spoken-goodbye successor (or any new encounter without Empty): allow the card again. */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Briefing")
+	void NotifyNewEncounter();
+
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Vision|Briefing")
 	void SkipToFinish();
 

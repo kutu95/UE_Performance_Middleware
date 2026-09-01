@@ -61,6 +61,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Godfrey|Voice Input")
 	bool IsVisitorSpeechInProgress() const { return bSpeechActive; }
 
+	/** True when the visitor is talking over Godfrey (lantern Wait) — show the Speak-when-green reminder. */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Voice Input")
+	bool IsSpeakWhileWaitWarningActive() const;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input")
 	FString GodfreyBrainBaseUrl = TEXT("http://localhost:3000");
 
@@ -74,6 +78,35 @@ public:
 	/** Pause STT while Godfrey is speaking (DirectSpeech or exhibition queue stream). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input")
 	bool bPauseWhileGodfreySpeaking = true;
+
+	/** Local RMS on the paused mic: remind visitors who talk while the lantern is Wait. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input")
+	bool bWarnIfSpeakWhileWait = true;
+
+	/** Minimum capture RMS (0–1) to count as a visitor talking over Godfrey. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input",
+		meta = (ClampMin = "0.01", ClampMax = "0.25", EditCondition = "bWarnIfSpeakWhileWait"))
+	float SpeakWhileWaitRmsThreshold = 0.045f;
+
+	/** Must also exceed the recent speaker-bleed floor by this factor (avoids false Wait warnings). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input",
+		meta = (ClampMin = "1.2", ClampMax = "6.0", EditCondition = "bWarnIfSpeakWhileWait"))
+	float SpeakWhileWaitBleedHeadroom = 2.5f;
+
+	/** How long the mic must stay loud before the reminder appears. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input",
+		meta = (ClampMin = "0.1", ClampMax = "2.0", EditCondition = "bWarnIfSpeakWhileWait"))
+	float SpeakWhileWaitHoldSeconds = 0.4f;
+
+	/** How long the reminder stays on screen. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input",
+		meta = (ClampMin = "1.0", ClampMax = "12.0", EditCondition = "bWarnIfSpeakWhileWait"))
+	float SpeakWhileWaitDisplaySeconds = 5.0f;
+
+	/** Minimum gap between reminders. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Voice Input",
+		meta = (ClampMin = "2.0", ClampMax = "30.0", EditCondition = "bWarnIfSpeakWhileWait"))
+	float SpeakWhileWaitCooldownSeconds = 10.0f;
 
 	/**
 	 * Keep the mic paused after audible speech ends so speaker tail / room reverb is not
@@ -178,6 +211,9 @@ private:
 	void ScheduleReconnect();
 	void OnCaptureAudio(const float* InAudio, int32 NumFrames, int32 NumChannels, int32 SampleRate);
 	void AppendResampledPcm16(const float* InAudio, int32 NumFrames, int32 NumChannels, int32 InSampleRate);
+	void NoteCaptureEnergy(const float* InAudio, int32 NumFrames, int32 NumChannels);
+	void UpdateSpeakWhileWaitWarning(float DeltaTime);
+	bool ShouldDetectSpeakWhileWait() const;
 
 	bool OpenCaptureStream();
 	void CloseCaptureStream();
@@ -204,6 +240,12 @@ private:
 	FTimerHandle ReconnectTimerHandle;
 	FTimerHandle MissedTranscriptTimerHandle;
 	FTimerHandle VisitorTurnCommitTimerHandle;
+
+	float LastCaptureRms = 0.f;
+	float SpeakWhileWaitBleedFloor = 0.f;
+	float SpeakWhileWaitLoudSeconds = 0.f;
+	double SpeakWhileWaitWarningUntilWorldTime = -1.0;
+	double SpeakWhileWaitCooldownUntilWorldTime = -1.0;
 
 	/** Opaque Audio::FAudioCapture held without exposing AudioCaptureCore in the header. */
 	struct FGodfreyAudioCaptureState* CaptureState = nullptr;

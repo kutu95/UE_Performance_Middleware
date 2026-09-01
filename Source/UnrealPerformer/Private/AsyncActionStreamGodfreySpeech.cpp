@@ -968,6 +968,10 @@ void UAsyncActionStreamGodfreySpeech::StartSpeakStreamPcmPost()
 			++Strong->HttpStreamChunkCount;
 
 			Strong->TotalHttpBodyBytesReceived += InLength;
+			if (UGodfreyPcmStreamSession* Session = Strong->StreamSession)
+			{
+				Session->NotifyHttpBodyProgress();
+			}
 
 
 
@@ -1493,9 +1497,9 @@ void UAsyncActionStreamGodfreySpeech::TryFinishStreamAfterHttpComplete()
 
 		// Do NOT force after the short config timeout while unmatched is still huge mid-speech —
 
-		// that caused ~7s game-thread hitches on long occasion speeches. Wait for natural catch-up
+		// that caused ~7s game-thread hitches on long occasion speeches. Wait until last voice
 
-		// or until playback is near the end (hitch then lands in the tail / silence).
+		// plus a short hush (hitch then lands in trailing breath, not on the closing words).
 
 		if (!StreamSession->ShouldForceEndAudioSamplesDespiteCatchUpLag(static_cast<float>(Elapsed)))
 
@@ -1854,6 +1858,10 @@ void UAsyncActionStreamGodfreySpeech::HandleRequestCompleted(bool bConnectedSucc
 
 
 	bHttpCompleteAwaitingFinish = true;
+	if (StreamSession)
+	{
+		StreamSession->NotifyHttpReceiveComplete();
+	}
 
 	ScheduleHttpBodyDrain();
 

@@ -81,6 +81,14 @@ void UGodfreyVisitorPresenceComponent::EndPlay(const EEndPlayReason::Type EndPla
 		World->GetTimerManager().ClearTimer(WelcomeSpeakTimerHandle);
 		World->GetTimerManager().ClearTimer(FarewellSpeakTimerHandle);
 	}
+	if (bPerformerPresenceEventsBound && PerformerState)
+	{
+		PerformerState->OnFarewellSequenceStarted.RemoveDynamic(
+			this, &UGodfreyVisitorPresenceComponent::HandleFarewellSequenceStarted);
+		PerformerState->OnSeaIdleStarted.RemoveDynamic(
+			this, &UGodfreyVisitorPresenceComponent::HandleSeaIdleStartedForSuccessor);
+		bPerformerPresenceEventsBound = false;
+	}
 	if (bBriefingFinishedBound)
 	{
 		if (AActor* Owner = GetOwner())
@@ -129,6 +137,7 @@ void UGodfreyVisitorPresenceComponent::ApplyProjectSettingsDefaults()
 	LeaveDwellSeconds = Settings->GodfreyWebcamLeaveDwellSeconds;
 	OccupancyLeaveFractionThreshold = Settings->GodfreyWebcamOccupancyLeaveFractionThreshold;
 	AbandonedEmptyRecaptureDelaySeconds = Settings->GodfreyAbandonedEmptyRecaptureDelaySeconds;
+	PostFarewellSuccessorSeconds = Settings->GodfreyPostFarewellSuccessorSeconds;
 }
 
 void UGodfreyVisitorPresenceComponent::TickComponent(
@@ -278,6 +287,37 @@ void UGodfreyVisitorPresenceComponent::NotifyEncounterAbandonedWhileOccupied()
 	UE_LOG(LogGodfreyVision, Log,
 		TEXT("VisitorPresence: encounter abandoned while occupied — Welcome blocked until empty recapture after SeaIdle (%.1fs)."),
 		AbandonedEmptyRecaptureDelaySeconds);
+	CancelPostFarewellSuccessor(TEXT("r10-abandoned"));
+}
+
+void UGodfreyVisitorPresenceComponent::NotifySpokenFarewellWhileOccupied()
+{
+	if (bPendingAbandonedEmptyRecapture || bBlockPresenceWelcomeUntilVacated)
+	{
+		return;
+	}
+	if (!IsOccupiedForSuccessor())
+	{
+		return;
+	}
+
+	bPostFarewellSuccessorArmed = true;
+	bPostFarewellSpeechRequested = false;
+	PostFarewellSuccessorCountdown = FMath::Max(0.5f, PostFarewellSuccessorSeconds);
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: spoken goodbye — waiting %.1fs for them to leave (occ=%.3f). Still occupied or speech → arrival card + Welcome."),
+		PostFarewellSuccessorCountdown,
+		OccupancyFraction);
+}
+
+void UGodfreyVisitorPresenceComponent::NotifyPostFarewellVisitorSpeech()
+{
+	if (!bPostFarewellSuccessorArmed)
+	{
+		return;
+	}
+	bPostFarewellSpeechRequested = true;
+	TryCompletePostFarewellSuccessor(TEXT("speech"));
 }
 
 bool UGodfreyVisitorPresenceComponent::ShouldDeferVisitorSpeechForPresenceWelcome() const
@@ -291,6 +331,10 @@ bool UGodfreyVisitorPresenceComponent::ShouldDeferVisitorSpeechForPresenceWelcom
 		return false;
 	}
 	if (bBlockPresenceWelcomeUntilVacated)
+	{
+		return true;
+	}
+	if (bPostFarewellSuccessorArmed)
 	{
 		return true;
 	}
@@ -702,6 +746,7 @@ void UGodfreyVisitorPresenceComponent::TickAnalysis(float DeltaTime)
 	}
 
 	TickAbandonedEmptyRecapture(DeltaTime);
+	TickPostFarewellSuccessor(DeltaTime);
 	TickEmptyBaselineMaintenance(DeltaTime);
 
 	EnsureAnalysisTarget();
@@ -1094,6 +1139,7 @@ void UGodfreyVisitorPresenceComponent::SetSenseState(EGodfreyVisitorSenseState N
 		}
 		bBlockPresenceWelcomeUntilVacated = false;
 		bPresenceWelcomeDeliveredThisVisit = false;
+		CancelPostFarewellSuccessor(TEXT("zone-empty"));
 	}
 
 	if (NewState == EGodfreyVisitorSenseState::Empty
@@ -1177,6 +1223,7 @@ void UGodfreyVisitorPresenceComponent::CompletePresenceEngage()
 	bPresenceFarewellRequested = false;
 	bPendingFarewellSpeak = false;
 	bPresenceWelcomeDeliveredThisVisit = true;
+	CancelPostFarewellSuccessor(TEXT("welcome-delivered"));
 	UE_LOG(LogGodfreyVision, Log,
 		TEXT("VisitorPresence: engaging from presence (Welcome armed) count=%d speak=%d inDialog=%d"),
 		EstimatedVisitorCount,
@@ -1447,6 +1494,159 @@ void UGodfreyVisitorPresenceComponent::TickAbandonedEmptyRecapture(float DeltaTi
 	BeginEmptyBackgroundCapture(TEXT("unanswered-idle"), true);
 }
 
+void UGodfreyVisitorPresenceComponent::TickPostFarewellSuccessor(float DeltaTime)
+{
+	if (!bPostFarewellSuccessorArmed || bCapturingEmptyBackground || bStartupIgnoreActive)
+	{
+		return;
+	}
+	if (bPendingAbandonedEmptyRecapture || bBlockPresenceWelcomeUntilVacated)
+	{
+		CancelPostFarewellSuccessor(TEXT("r10-abandoned"));
+		return;
+	}
+	if (VisitorSenseState == EGodfreyVisitorSenseState::Leaving)
+	{
+		return;
+	}
+	if (VisitorSenseState == EGodfreyVisitorSenseState::Empty || !IsOccupiedForSuccessor())
+	{
+		CancelPostFarewellSuccessor(TEXT("left"));
+		return;
+	}
+	if (PerformerState && PerformerState->IsInDialog())
+	{
+		CancelPostFarewellSuccessor(TEXT("already-in-dialog"));
+		return;
+	}
+
+	if (bPostFarewellSpeechRequested)
+	{
+		TryCompletePostFarewellSuccessor(TEXT("speech"));
+		return;
+	}
+
+	if (PostFarewellSuccessorCountdown < 0.f)
+	{
+		TryCompletePostFarewellSuccessor(TEXT("still-occupied"));
+		return;
+	}
+
+	PostFarewellSuccessorCountdown -= DeltaTime;
+	if (PostFarewellSuccessorCountdown > 0.f)
+	{
+		return;
+	}
+	PostFarewellSuccessorCountdown = -1.f;
+	TryCompletePostFarewellSuccessor(TEXT("still-occupied"));
+}
+
+void UGodfreyVisitorPresenceComponent::CancelPostFarewellSuccessor(const TCHAR* Reason)
+{
+	if (!bPostFarewellSuccessorArmed && !bPostFarewellSpeechRequested)
+	{
+		return;
+	}
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: post-goodbye successor cancelled (%s)."),
+		Reason ? Reason : TEXT("?"));
+	bPostFarewellSuccessorArmed = false;
+	bPostFarewellSpeechRequested = false;
+	PostFarewellSuccessorCountdown = -1.f;
+}
+
+void UGodfreyVisitorPresenceComponent::TryCompletePostFarewellSuccessor(const TCHAR* Reason)
+{
+	if (!bPostFarewellSuccessorArmed)
+	{
+		return;
+	}
+	if (bPendingAbandonedEmptyRecapture || bBlockPresenceWelcomeUntilVacated)
+	{
+		CancelPostFarewellSuccessor(TEXT("r10-abandoned"));
+		return;
+	}
+	if (VisitorSenseState == EGodfreyVisitorSenseState::Leaving)
+	{
+		return;
+	}
+	if (VisitorSenseState == EGodfreyVisitorSenseState::Empty || !IsOccupiedForSuccessor())
+	{
+		CancelPostFarewellSuccessor(TEXT("left"));
+		return;
+	}
+	if (!CanStartSuccessorWelcome())
+	{
+		return;
+	}
+	BeginSuccessorEncounter(Reason);
+}
+
+void UGodfreyVisitorPresenceComponent::BeginSuccessorEncounter(const TCHAR* Reason)
+{
+	bPostFarewellSuccessorArmed = false;
+	bPostFarewellSpeechRequested = false;
+	PostFarewellSuccessorCountdown = -1.f;
+	bPresenceWelcomeDeliveredThisVisit = false;
+	bPresenceFarewellRequested = false;
+	bPendingFarewellSpeak = false;
+	if (UGodfreyVisitorBriefingComponent* Briefing = ResolveVisitorBriefing())
+	{
+		Briefing->NotifyNewEncounter();
+	}
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: post-goodbye new visitor (%s) occ=%.3f mot=%.3f — arrival card + Welcome."),
+		Reason ? Reason : TEXT("?"),
+		OccupancyFraction,
+		MotionFraction);
+	TryPresenceEngage();
+}
+
+bool UGodfreyVisitorPresenceComponent::IsOccupiedForSuccessor() const
+{
+	return bForceOccupied || VisitorSenseState == EGodfreyVisitorSenseState::Present;
+}
+
+bool UGodfreyVisitorPresenceComponent::CanStartSuccessorWelcome() const
+{
+	if (!PerformerState)
+	{
+		return false;
+	}
+	return PerformerState->GetExhibitionPresence() == EGodfreyExhibitionPresence::SeaIdle
+		&& !PerformerState->IsInDialog();
+}
+
+void UGodfreyVisitorPresenceComponent::HandleFarewellSequenceStarted()
+{
+	NotifySpokenFarewellWhileOccupied();
+}
+
+void UGodfreyVisitorPresenceComponent::HandleSeaIdleStartedForSuccessor()
+{
+	if (!bPostFarewellSuccessorArmed)
+	{
+		return;
+	}
+	if (PostFarewellSuccessorCountdown < 0.f || bPostFarewellSpeechRequested)
+	{
+		TryCompletePostFarewellSuccessor(bPostFarewellSpeechRequested ? TEXT("speech") : TEXT("still-occupied"));
+	}
+}
+
+void UGodfreyVisitorPresenceComponent::BindPerformerPresenceEvents()
+{
+	if (bPerformerPresenceEventsBound || !PerformerState)
+	{
+		return;
+	}
+	PerformerState->OnFarewellSequenceStarted.AddDynamic(
+		this, &UGodfreyVisitorPresenceComponent::HandleFarewellSequenceStarted);
+	PerformerState->OnSeaIdleStarted.AddDynamic(
+		this, &UGodfreyVisitorPresenceComponent::HandleSeaIdleStartedForSuccessor);
+	bPerformerPresenceEventsBound = true;
+}
+
 void UGodfreyVisitorPresenceComponent::TickEmptyBaselineMaintenance(float DeltaTime)
 {
 	if (bStartupIgnoreActive || bCapturingEmptyBackground || !bBackgroundReady)
@@ -1538,7 +1738,7 @@ void UGodfreyVisitorPresenceComponent::TickOccupancyDebugLog(float DeltaTime)
 	}
 	OccupancyDebugLogCountdown = 5.f;
 	UE_LOG(LogGodfreyVision, Log,
-		TEXT("VisitorPresence: heartbeat sense=%s occ=%.3f mot=%.3f count=%d rawOcc=%d rawMot=%d emptyAge=%.0fs leaveDwell=%.1f"),
+		TEXT("VisitorPresence: heartbeat sense=%s occ=%.3f mot=%.3f count=%d rawOcc=%d rawMot=%d emptyAge=%.0fs leaveDwell=%.1f successor=%d wait=%.1f"),
 		GodfreyVisitorPresencePrivate::SenseStateName(VisitorSenseState),
 		OccupancyFraction,
 		MotionFraction,
@@ -1546,7 +1746,9 @@ void UGodfreyVisitorPresenceComponent::TickOccupancyDebugLog(float DeltaTime)
 		bRawOccupied ? 1 : 0,
 		bRawMotion ? 1 : 0,
 		GetEmptyBackgroundAgeSeconds(),
-		LeaveDwellRemaining);
+		LeaveDwellRemaining,
+		bPostFarewellSuccessorArmed ? 1 : 0,
+		PostFarewellSuccessorCountdown);
 }
 
 UGodfreyDirectSpeechComponent* UGodfreyVisitorPresenceComponent::ResolveDirectSpeech() const
@@ -1607,6 +1809,7 @@ void UGodfreyVisitorPresenceComponent::ResolvePerformerComponents()
 	{
 		PerformerState = Godfrey->FindComponentByClass<UGodfreyPerformanceStateComponent>();
 		AnimationBridge = Godfrey->FindComponentByClass<UGodfreyPerformerAnimationBridgeComponent>();
+		BindPerformerPresenceEvents();
 	}
 }
 
