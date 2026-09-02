@@ -83,10 +83,11 @@ public:
 	float GodfreyAceSoftThrottleMediumUnmatchedSeconds = 0.45f;
 
 	/**
-	 * After HTTP+PCM drain, defer EndAudioSamples while ACE is still mid-utterance
-	 * (playhead behind sent PCM). A2F withholds ~0.8–0.9s of curves until EndAudioSamples,
-	 * so unmatched can look “caught up” while Welcome is still playing — do not flush on that
-	 * floor alone (Welcome hitch). Wait until the playhead has reached sent PCM.
+	 * After HTTP+PCM drain, defer EndAudioSamples while ACE is still mid-utterance.
+	 * A2F withholds ~0.8–0.9s of curves until EndAudioSamples, so unmatched can look “caught up”
+	 * while Welcome is still playing — do not flush on that floor alone. Wait until the
+	 * playhead has passed sent PCM + BufferLength + GodfreyAceEndAudioPostRollSeconds.
+	 * Do not wait for IsProceduralAudioPlaying()==false: that flag stays true until Stop.
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest")
 	bool bGodfreyDeferEndAudioSamplesForCurveCatchUp = false;
@@ -98,6 +99,15 @@ public:
 	/** Cap how long FinishStream waits for curve catch-up before forcing EndAudioSamples anyway. */
 	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest", meta = (ClampMin = "1.0", ClampMax = "60.0", UIMin = "5.0", UIMax = "30.0"))
 	float GodfreyAceEndAudioCatchUpTimeoutSeconds = 20.f;
+
+	/**
+	 * After Wall has passed sent PCM + BufferLength, wait this extra hush before
+	 * EndAudioSamples. ACE's wall clock leads the speakers (output delay), so 0.75s was
+	 * still on the last sentence. Never mute or Stop() on this timer — that cut the tail
+	 * (2026-09-01 09:39). Abort is the only Volume=0/Stop path.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "ACE Ingest", meta = (ClampMin = "0.15", ClampMax = "2.5", UIMin = "0.35", UIMax = "1.5"))
+	float GodfreyAceEndAudioPostRollSeconds = 1.5f;
 
 	/**
 	 * If HTTP is still open but audible playback has already caught the PCM we have, and no
@@ -362,7 +372,7 @@ public:
 	/** Brain prompt for the presence-welcome spoken turn. */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence", meta = (MultiLine = "true", EditCondition = "bGodfreyPresenceWelcomeSpeak"))
 	FString GodfreyPresenceWelcomeSpeakPrompt = TEXT(
-		"(A visitor has just approached and stands before you. Welcome them warmly in one or two short sentences, in character. Do not wait for them to speak first.)");
+		"(A visitor has just approached and stands before you. Welcome them warmly in one or two short sentences, in character. If you give your name, say Captain Godfrey. End with a short question that invites them to speak — who they are, or whether they have been to sea. Do not wait for them to speak first.)");
 
 	/** When webcam leave-dwell completes while in dialog, spoken goodbye + farewell gesture. */
 	UPROPERTY(Config, EditAnywhere, Category = "Vision|Presence")

@@ -106,7 +106,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence")
 	bool bEngageOnPresence = true;
 
-	/** After presence Welcome montage is armed, AskGodfrey for a short spoken welcome (UE-owned, R17). */
+	/** After presence Welcome montage is armed, AskGodfrey for a short spoken welcome (UE-owned, R17). Prefetched during the arrival card. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence")
 	bool bSpeakWelcomeOnPresence = true;
 
@@ -116,9 +116,9 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (MultiLine = "true"))
 	FString WelcomeSpeakPrompt = TEXT(
-		"(A visitor has just approached and stands before you. Welcome them warmly in one or two short sentences, in character. Do not wait for them to speak first.)");
+		"(A visitor has just approached and stands before you. Welcome them warmly in one or two short sentences, in character. If you give your name, say Captain Godfrey. End with a short question that invites them to speak — who they are, or whether they have been to sea. Do not wait for them to speak first.)");
 
-	/** Small delay so EngageGreet Welcome montage starts before Thinking/speech is requested. */
+	/** Small delay so EngageGreet Welcome montage starts before Thinking/speech (no-card path only). Card path prefetches with audible hold. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Vision|Presence", meta = (ClampMin = "0.0", ClampMax = "3.0"))
 	float WelcomeSpeakDelaySeconds = 0.35f;
 
@@ -313,10 +313,13 @@ private:
 	float GetEmptyBackgroundAgeSeconds() const;
 	void SetSenseState(EGodfreyVisitorSenseState NewState);
 	void TryPresenceEngage();
+	void StartArrivalCardWelcome();
+	void AbortArrivalCardWelcome(const TCHAR* Reason);
 	void CompletePresenceEngage();
 	UFUNCTION()
 	void HandleVisitorBriefingFinished();
 	class UGodfreyVisitorBriefingComponent* ResolveVisitorBriefing();
+	void RequestPromptCacheWarm();
 	void RequestWelcomeSpeak();
 	UFUNCTION()
 	void HandleWelcomeSpeakTimer();
@@ -371,6 +374,7 @@ private:
 	bool bPendingFarewellSpeak = false;
 	bool bBlockPresenceWelcomeUntilVacated = false;
 	bool bPresenceWelcomeDeliveredThisVisit = false;
+	bool bPresenceWelcomePrefetchActive = false;
 	bool bPendingAbandonedEmptyRecapture = false;
 	bool bPostFarewellSuccessorArmed = false;
 	bool bPostFarewellSpeechRequested = false;

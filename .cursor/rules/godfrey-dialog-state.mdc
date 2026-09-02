@@ -10,7 +10,7 @@ When changing Godfrey body animation, idle selection, listening/speaking holds, 
 ## Meaning
 
 - **Out of dialog:** game start (SeaIdle), or after a farewell AS has started / finished (returning to sea).
-- **In dialog:** from engage until farewell begins. A new visitor’s first turn is **webcam presence** (arrival card then Welcome / R17), not the microphone. Visitor speech engages only after that Welcome, or if the webcam is off.
+- **In dialog:** from engage until farewell begins. A new visitor’s first turn is **webcam presence** (arrival card + Greeting while the card is up, spoken Welcome as soon as it clears / R17), not the microphone. Visitor speech engages only after that Welcome, or if the webcam is off.
 
 API: `UGodfreyPerformanceStateComponent::IsInDialog()` (Engaging + Conversing).
 
@@ -18,11 +18,11 @@ Living tracker: `Docs/GodfreyBehaviourRules.md` (R7, R8, R9, R13, R14, R15, R17,
 
 ## Animation rules
 
-- **In dialog:** after an optional first Greeting* hold (R15), attentive listening-pool idles only (`ListeningAttentive` / `Curious` / `Concerned` / `Nodding`). Never play looking-out-to-sea idles (`IdleLookingToSea_*`, SeaIdle exhibition hold) as the conversation hold.
+- **In dialog:** after an optional first Greeting* hold (R15), attentive listening-pool idles only (`ListeningAttentive` / `Curious` / `Concerned` / `Nodding`) **while Speak is green**. When the lantern is Wait (visitor finished, Brain generating), thinking-pool AS (`ThinkingHandToChin`, `Thinking_01`/`_02`, DeepBreath, Remembering; Coy and ScratchingHead rarely) until he speaks. Never play Idle* overlays (`IdleLookingToSea_*`, `IdleStanding`, `IdleWeightShift`, `IdleRockingOnFeet`, SeaIdle exhibition hold) as the conversation hold.
 - **First dialog hold (R15):** SeaIdle → dialog once uses `DialogGreetingPool` (`GreetingNod` / `SmallSmile` / `HaveASeat` / `Welcome`); then R9 listening deck.
 - **In-dialog idle sequencing (R9):** play pool AS as one-shots in a shuffled non-repeating deck; blend AS→AS (do not section-loop one clip).
-- **Speaking body (R14):** while speaking, shuffled one-shot deck from `SpeakingIdlePool` (`Describing*`, `SpeakingDescribe*`, `SpeakingExplainDanger`, calm/emphasis) — never section-loop `CalmExplanation` alone. Conversation AS overlay **UpperBody** (spine_01+) over a planted `IdleStanding` DefaultSlot hold so blends cannot skate the whole figure (R20).
-- **Speak→listen (R16):** after audio/lipsync ends, keep speaking body ~1s, then long soft blend into Listening*.
+- **Speaking body (R14):** Brain plans distinct `[gesture:]` takes to cover the whole spoken line and must not repeat a CatalogId. Unreal plays each Brain take **once, to completion**; later markers that arrive while a take is still playing are queued, not used to cut it short. If Brain omitted a cue or the take ends while he is still talking, Unreal fills with a **different** basic explaining clip — never Greeting/Thinking/Idle, never a loop of the last stem. Conversation AS overlay **UpperBody** (spine_01+) over a planted `IdleStanding` DefaultSlot hold (R20). Presence Welcome / Greeting must not survive into (or after) speech. `[amused]` / `[emphasis]` / `[serious]` are mood only and must not leave Speaking or jump to Listening* while ACE is still playing.
+- **Speak→listen (R16):** after audio/lipsync ends, keep speaking body ~1s, then long soft blend into Listening*. Do not start this hold from a mood cue.
 - **Out of dialog (R13):** SeaIdle exhibition hold uses a shuffled calm-idle deck (`IdleLookingToSea_*`, standing/weight-shift/rocking, hands behind back) as soft-blended one-shots. Never section-loop a single SeaIdle AS. Do not use `HandsClasped` (drives hands/sleeves through the jacket; R23).
 - **Speaking end:** Speaking body AS must end when audible ACE playback ends (audio-end watchdog from `OnAnimationStarted`), not only when HTTP `FinishStream` completes.
 - **Idle re-engagement (R10):** after visitor inactivity, engagement prompts are owned by **Unreal**, not Brain timers/web idle nudge. Brain must not speak unsolicited to re-engage. Do not fire a quiet nudge if visitor speech is already detected; abort an in-flight nudge on `speech_started`. After two unanswered engagement prompts, assume they left, return to SeaIdle, then recapture the empty-room webcam baseline after 2s (waiting for the next visitor).

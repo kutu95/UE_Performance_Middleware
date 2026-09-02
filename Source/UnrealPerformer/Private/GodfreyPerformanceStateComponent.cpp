@@ -113,6 +113,7 @@ void UGodfreyPerformanceStateComponent::BeginPlay()
 
 void UGodfreyPerformanceStateComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	bUtteranceInProgress = false;
 	SetComponentTickEnabled(false);
 	UGodfreyPcmStreamSession::AbortActiveStreamForCharacter(GetOwner(), TEXT("performance state EndPlay"));
 	Super::EndPlay(EndPlayReason);
@@ -438,6 +439,16 @@ void UGodfreyPerformanceStateComponent::NotifyFarewellSequenceFinished()
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: farewell finished — SeaIdle."));
 }
 
+void UGodfreyPerformanceStateComponent::CancelEngageReturnToSeaIdle()
+{
+	if (ExhibitionPresence == EGodfreyExhibitionPresence::SeaIdle)
+	{
+		return;
+	}
+	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: cancel engage — return to SeaIdle."));
+	EnterSeaIdlePresence();
+}
+
 void UGodfreyPerformanceStateComponent::TickVisitorIdleTimeout(float /*DeltaTime*/)
 {
 	if (!bHasEngagedVisitor || ExhibitionPresence != EGodfreyExhibitionPresence::Conversing)
@@ -753,6 +764,12 @@ bool UGodfreyPerformanceStateComponent::LooksLikeFarewellCue(const FString& CueT
 
 void UGodfreyPerformanceStateComponent::BeginListening()
 {
+	if (PerformanceState == EGodfreyPerformanceState::Speaking || bUtteranceInProgress)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: BeginListening ignored (utterance still in progress)."));
+		return;
+	}
 	if (bEnableExhibitionPresence && ExhibitionPresence == EGodfreyExhibitionPresence::SeaIdle)
 	{
 		SetPendingPostEngageState(EGodfreyPerformanceState::Listening);
@@ -779,6 +796,12 @@ void UGodfreyPerformanceStateComponent::BeginListening()
 
 void UGodfreyPerformanceStateComponent::BeginThinking()
 {
+	if (PerformanceState == EGodfreyPerformanceState::Speaking || bUtteranceInProgress)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: BeginThinking ignored (utterance still in progress)."));
+		return;
+	}
 	if (bEnableExhibitionPresence && ExhibitionPresence == EGodfreyExhibitionPresence::SeaIdle)
 	{
 		SetPendingPostEngageState(EGodfreyPerformanceState::Thinking);
@@ -834,6 +857,13 @@ void UGodfreyPerformanceStateComponent::BeginSpeaking()
 	{
 		SetPendingPostEngageState(EGodfreyPerformanceState::Speaking);
 		NotifyVisitorActivity();
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: BeginSpeaking during Engaging — finish greet, EnterSpeaking now (R4)."));
+		NotifyEngageSequenceFinished();
+		if (PerformanceState != EGodfreyPerformanceState::Speaking)
+		{
+			EnterSpeaking();
+		}
 		return;
 	}
 	if (bEnableExhibitionPresence && ExhibitionPresence == EGodfreyExhibitionPresence::Farewell)
@@ -884,6 +914,12 @@ void UGodfreyPerformanceStateComponent::EndSpeaking()
 
 void UGodfreyPerformanceStateComponent::ReturnToIdle()
 {
+	if (PerformanceState == EGodfreyPerformanceState::Speaking || bUtteranceInProgress)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: ReturnToIdle ignored (utterance still in progress)."));
+		return;
+	}
 	if (bEnableExhibitionPresence && bReturnToListeningWhileEngaged && bHasEngagedVisitor
 		&& ExhibitionPresence == EGodfreyExhibitionPresence::Conversing
 		&& PerformanceState != EGodfreyPerformanceState::Speaking)
@@ -897,6 +933,13 @@ void UGodfreyPerformanceStateComponent::ReturnToIdle()
 
 void UGodfreyPerformanceStateComponent::TriggerEmphasis()
 {
+	if (PerformanceState == EGodfreyPerformanceState::Speaking || bUtteranceInProgress)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: TriggerEmphasis mood-only (stay Speaking)."));
+		OnEmphasisTriggered.Broadcast();
+		return;
+	}
 	if (PerformanceState == EGodfreyPerformanceState::Emphasising)
 	{
 		UE_LOG(LogGodfreyPerformance, Verbose, TEXT("GodfreyPerformer: TriggerEmphasis retrigger (already Emphasising)."));
@@ -908,6 +951,13 @@ void UGodfreyPerformanceStateComponent::TriggerEmphasis()
 
 void UGodfreyPerformanceStateComponent::TriggerAmused()
 {
+	if (PerformanceState == EGodfreyPerformanceState::Speaking || bUtteranceInProgress)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: TriggerAmused mood-only (stay Speaking)."));
+		OnAmusedTriggered.Broadcast();
+		return;
+	}
 	if (PerformanceState == EGodfreyPerformanceState::Amused)
 	{
 		UE_LOG(LogGodfreyPerformance, Verbose, TEXT("GodfreyPerformer: TriggerAmused retrigger."));
@@ -919,6 +969,13 @@ void UGodfreyPerformanceStateComponent::TriggerAmused()
 
 void UGodfreyPerformanceStateComponent::TriggerSerious()
 {
+	if (PerformanceState == EGodfreyPerformanceState::Speaking || bUtteranceInProgress)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: TriggerSerious mood-only (stay Speaking)."));
+		OnSeriousTriggered.Broadcast();
+		return;
+	}
 	if (PerformanceState == EGodfreyPerformanceState::Serious)
 	{
 		UE_LOG(LogGodfreyPerformance, Verbose, TEXT("GodfreyPerformer: TriggerSerious retrigger."));
@@ -985,6 +1042,7 @@ void UGodfreyPerformanceStateComponent::ResetToIdle()
 
 void UGodfreyPerformanceStateComponent::NotifyUtteranceStarted()
 {
+	bUtteranceInProgress = true;
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: NotifyUtteranceStarted"));
 	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
 	{
@@ -1005,6 +1063,7 @@ void UGodfreyPerformanceStateComponent::NotifyUtteranceStarted()
 
 void UGodfreyPerformanceStateComponent::NotifyUtteranceEnded()
 {
+	bUtteranceInProgress = false;
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: NotifyUtteranceEnded"));
 	bDialogEngagePromptInFlight = false;
 	if (UGodfreyDiagnosticsSubsystem* Diag = UGodfreyDiagnosticsSubsystem::Get(this))
@@ -1027,6 +1086,15 @@ void UGodfreyPerformanceStateComponent::NotifyUtteranceEnded()
 
 	if (bAutoSpeakingStateFromUtterance)
 	{
+		if (PerformanceState == EGodfreyPerformanceState::Emphasising
+			|| PerformanceState == EGodfreyPerformanceState::Serious
+			|| PerformanceState == EGodfreyPerformanceState::Amused)
+		{
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformer: utterance ended from mood overlay %d — restoring Speaking then EndSpeaking."),
+				static_cast<int32>(PerformanceState));
+			PerformanceState = EGodfreyPerformanceState::Speaking;
+		}
 		if (PerformanceState == EGodfreyPerformanceState::Speaking)
 		{
 			UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: auto utterance -> EndSpeaking"));
@@ -1114,15 +1182,13 @@ void UGodfreyPerformanceStateComponent::NotifyReplyIncoming(const FString& Reque
 	AwaitingBrainRequestId = TrimmedId;
 	NotifyVisitorActivity();
 	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyPerformer: NotifyReplyIncoming awaiting_reply requestId=%s"), *TrimmedId);
+		TEXT("GodfreyPerformer: NotifyReplyIncoming awaiting_reply requestId=%s — BeginThinking"), *TrimmedId);
 
-	if (PerformanceState == EGodfreyPerformanceState::Listening)
+	if (PerformanceState == EGodfreyPerformanceState::Speaking)
 	{
-		// Already Listening (visitor-await IdleBreathing) — re-fire so bridge plays ListeningEnter.
-		OnListeningStarted.Broadcast();
 		return;
 	}
-	BeginListening();
+	BeginThinking();
 }
 
 void UGodfreyPerformanceStateComponent::ClearReplyIncoming(const bool bRefreshVisitorAwaitListening)
@@ -1295,6 +1361,25 @@ bool UGodfreyPerformanceStateComponent::TryConsumePerformanceCueForRouting(const
 void UGodfreyPerformanceStateComponent::ApplyPerformanceState(const EGodfreyPerformanceState NewState)
 {
 	const EGodfreyPerformanceState Previous = PerformanceState;
+	const bool bMoodOverlay = NewState == EGodfreyPerformanceState::Emphasising
+		|| NewState == EGodfreyPerformanceState::Serious
+		|| NewState == EGodfreyPerformanceState::Amused;
+	if (bUtteranceInProgress && Previous == EGodfreyPerformanceState::Speaking
+		&& NewState != EGodfreyPerformanceState::Speaking)
+	{
+		if (bMoodOverlay)
+		{
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformer: mood overlay %d while Speaking — keeping Speaking (does not end speech)."),
+				static_cast<int32>(NewState));
+			DispatchEnteredStateDelegates(NewState, Previous);
+			return;
+		}
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformer: refusing state %d -> %d while utterance in progress (stay Speaking)."),
+			static_cast<int32>(Previous), static_cast<int32>(NewState));
+		return;
+	}
 	PerformanceState = NewState;
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformer: performance state %d -> %d"), static_cast<int32>(Previous),
 		static_cast<int32>(NewState));

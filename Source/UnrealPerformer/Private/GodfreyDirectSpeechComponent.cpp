@@ -171,8 +171,63 @@ bool UGodfreyDirectSpeechComponent::AskGodfrey(const FString& PromptText)
 		return false;
 	}
 
-	StartStreamForPrompt(Trimmed);
+	StartStreamForPrompt(Trimmed, false);
 	return true;
+}
+
+bool UGodfreyDirectSpeechComponent::AskGodfreyHeldAudible(const FString& PromptText)
+{
+	const FString Trimmed = PromptText.TrimStartAndEnd();
+	if (Trimmed.IsEmpty())
+	{
+		UE_LOG(LogGodfreyDirectSpeech, Warning, TEXT("AskGodfreyHeldAudible: prompt text is empty."));
+		return false;
+	}
+
+	if (bIsStreaming)
+	{
+		UE_LOG(LogGodfreyDirectSpeech, Warning, TEXT("AskGodfreyHeldAudible: already streaming; ignoring new prompt."));
+		return false;
+	}
+
+	if (AActor* const AcePreview = ResolveCharacterForAce())
+	{
+		if (const UGodfreyPerformanceStateComponent* Perf =
+			AcePreview->FindComponentByClass<UGodfreyPerformanceStateComponent>())
+		{
+			const EGodfreyPerformanceState State = Perf->GetPerformanceState();
+			if (State == EGodfreyPerformanceState::Speaking || State == EGodfreyPerformanceState::Thinking)
+			{
+				UE_LOG(LogGodfreyDirectSpeech, Warning,
+					TEXT("AskGodfreyHeldAudible: performer busy (state=%d); ignoring new prompt."), static_cast<int32>(State));
+				return false;
+			}
+		}
+	}
+
+	if (!ResolveCharacterForAce())
+	{
+		const FString Err = TEXT("AskGodfreyHeldAudible: CharacterForAce is not set and could not be resolved.");
+		UE_LOG(LogGodfreyDirectSpeech, Error, TEXT("%s"), *Err);
+		OnStreamError.Broadcast(Err);
+		return false;
+	}
+
+	if (GodfreyBrainBaseUrl.IsEmpty())
+	{
+		const FString Err = TEXT("AskGodfreyHeldAudible: GodfreyBrainBaseUrl is empty.");
+		UE_LOG(LogGodfreyDirectSpeech, Error, TEXT("%s"), *Err);
+		OnStreamError.Broadcast(Err);
+		return false;
+	}
+
+	StartStreamForPrompt(Trimmed, true);
+	return true;
+}
+
+void UGodfreyDirectSpeechComponent::ReleaseHeldAudiblePlayback()
+{
+	UGodfreyPcmStreamSession::ReleaseAudibleHoldForCharacter(ResolveCharacterForAce(), TEXT("arrival-card-done"));
 }
 
 void UGodfreyDirectSpeechComponent::AbortCurrentStream(const FString& Reason)
@@ -189,7 +244,7 @@ void UGodfreyDirectSpeechComponent::AbortCurrentStream(const FString& Reason)
 	NotifyPerformerListening();
 }
 
-void UGodfreyDirectSpeechComponent::StartStreamForPrompt(const FString& TrimmedPrompt)
+void UGodfreyDirectSpeechComponent::StartStreamForPrompt(const FString& TrimmedPrompt, const bool bHoldAudible)
 {
 	AActor* const AceCharacter = ResolveCharacterForAce();
 	UWorld* const World = GetWorld();
@@ -199,13 +254,17 @@ void UGodfreyDirectSpeechComponent::StartStreamForPrompt(const FString& TrimmedP
 	}
 
 	bIsStreaming = true;
-	NotifyPerformerThinking();
+	if (!bHoldAudible)
+	{
+		NotifyPerformerThinking();
+	}
 
 	UE_LOG(LogGodfreyDirectSpeech, Log,
-		TEXT("AskGodfrey: direct stream POST text_len=%d character=%s url=%s"),
+		TEXT("AskGodfrey: direct stream POST text_len=%d character=%s url=%s holdAudible=%d"),
 		TrimmedPrompt.Len(),
 		*AceCharacter->GetName(),
-		*GodfreyBrainBaseUrl);
+		*GodfreyBrainBaseUrl,
+		bHoldAudible ? 1 : 0);
 
 	ActiveStreamAction = UAsyncActionStreamGodfreySpeech::StreamGodfreySpeechToAudio(
 		World,
@@ -223,6 +282,11 @@ void UGodfreyDirectSpeechComponent::StartStreamForPrompt(const FString& TrimmedP
 		UE_LOG(LogGodfreyDirectSpeech, Error, TEXT("%s"), *Err);
 		OnStreamError.Broadcast(Err);
 		return;
+	}
+
+	if (bHoldAudible)
+	{
+		ActiveStreamAction->SetHoldAudibleUntilReleased(true);
 	}
 
 	ActiveStreamAction->OnPlaybackStarted.AddDynamic(this, &UGodfreyDirectSpeechComponent::HandleStreamPlaybackStarted);

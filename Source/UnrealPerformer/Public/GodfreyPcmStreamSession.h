@@ -63,6 +63,21 @@ public:
 	/** Optional Brain requestId for SpeechId correlation (set before StartStream when known). */
 	void SetBrainRequestId(const FString& InRequestId);
 
+	/**
+	 * Ingest PCM / A2F as usual but do not let ACE Play until ReleaseAudibleHold.
+	 * Used to prefetch presence Welcome during the arrival card.
+	 */
+	void SetHoldAudibleUntilReleased(bool bHold);
+
+	/** Drop the arrival-card play gate so ACE can start as soon as it has samples. */
+	void ReleaseAudibleHold(const TCHAR* Reason = TEXT("release"));
+
+	UFUNCTION(BlueprintCallable, Category = "Audio|Godfrey|Streaming")
+	static void ReleaseAudibleHoldForCharacter(AActor* Character, const FString& Reason = TEXT("release"));
+
+	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
+	bool IsAudibleHoldActive() const { return bHoldAudibleUntilReleased; }
+
 	UFUNCTION(BlueprintPure, Category = "Audio|Godfrey|Streaming")
 	FString GetSpeechId() const { return SpeechId; }
 
@@ -94,15 +109,16 @@ public:
 	float GetLastVoiceAudioSeconds() const;
 
 	/**
-	 * True while ACE is playing and curves lag sent audio enough that EndAudioSamples would hitch.
-	 * Caller should keep polling until false (or timeout) before FinishStream.
+	 * True while the ACE playhead has not yet reached sent PCM + BufferLength + post-roll hush.
+	 * Caller should keep polling until false (or the 120s stall) before FinishStream.
 	 */
 	bool ShouldDeferEndAudioSamplesForCurveCatchUp() const;
 
 	/**
-	 * After HTTP drain, force EndAudioSamples once audible playback has caught sent PCM
-	 * (any length), or after last voice plus a short hush, or at the 120s stall deadline.
-	 * Never force mid-speech with tens of seconds unmatched — that blocks the game thread.
+	 * After HTTP drain, allow EndAudioSamples once the playhead is in trailing hush
+	 * (sent + BufferLength + post-roll), or if playback actually stopped near sent PCM,
+	 * or at the 120s stall deadline. Never use HTTP-drain elapsed as the cue — that
+	 * re-flushed on the last word (2026-09-01).
 	 */
 	bool ShouldForceEndAudioSamplesDespiteCatchUpLag(float CatchUpElapsedSeconds) const;
 
@@ -228,7 +244,7 @@ private:
 	float LastPositiveProceduralWallSeconds = -1.f;
 	int64 SpeechGainSaturatedSampleCount = 0;
 	int64 SpeechSilenceGatedSampleCount = 0;
-	/** Samples through the last voiced 20ms window (RMS floor). Trailing breath above the sample gate is not voice. */
+	/** Samples through the last voiced 20ms window (capped RMS floor). Trailing breath above the sample gate is not voice. */
 	int64 LastNonSilentSamplesSentToAce = 0;
 	/** Last sample >= silence gate; diagnostic only (late vs perceived end of speech). */
 	int64 LastGate750SamplesSentToAce = 0;
@@ -243,6 +259,7 @@ private:
 	TObjectPtr<UAudio2FaceParameters> AceFaceParameters;
 	bool bStreamStarted = false;
 	bool bFinished = false;
+	bool bAceEndAudioSamplesDispatched = false;
 	bool bLoggedFirstPcmChunk = false;
 	bool bLoggedSpeechGainThisUtterance = false;
 	bool bBoundAceAnimationStarted = false;
@@ -271,6 +288,8 @@ private:
 	bool bGodfreyAceBufferLengthOverriddenThisUtterance = false;
 	bool bGodfreyAceMinBlendOverriddenThisUtterance = false;
 	bool bGodfreyAceMinCurveLeadOverriddenThisUtterance = false;
+	/** Prefetch ingest; ACE Play stays blocked until ReleaseAudibleHold (arrival card). */
+	bool bHoldAudibleUntilReleased = false;
 	FGodfreyAceUtteranceStartupMetrics UtteranceStartupMetrics;
 
 	FTimerHandle DeferredAceUnbindTimerHandle;

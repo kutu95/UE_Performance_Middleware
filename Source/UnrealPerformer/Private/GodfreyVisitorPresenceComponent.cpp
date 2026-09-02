@@ -13,6 +13,10 @@
 #include "GodfreyPerformanceStateComponent.h"
 #include "GodfreyPerformerAnimationBridgeComponent.h"
 #include "GodfreyVisitorBriefingComponent.h"
+#include "GodfreyPcmStreamSession.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
+#include "Interfaces/IHttpResponse.h"
 #include "Kismet/KismetRenderingLibrary.h"
 #include "MediaPlayer.h"
 #include "MediaTexture.h"
@@ -278,6 +282,7 @@ void UGodfreyVisitorPresenceComponent::NotifyEncounterAbandonedWhileOccupied()
 	}
 	bBlockPresenceWelcomeUntilVacated = true;
 	bPresenceWelcomeDeliveredThisVisit = false;
+	AbortArrivalCardWelcome(TEXT("abandoned-occupied"));
 	bPendingAbandonedEmptyRecapture = true;
 	AbandonedEmptyRecaptureCountdown = -1.f;
 	if (UWorld* World = GetWorld())
@@ -1126,6 +1131,11 @@ void UGodfreyVisitorPresenceComponent::SetSenseState(EGodfreyVisitorSenseState N
 		*ActiveDeviceDisplayName);
 	OnVisitorSenseChanged.Broadcast(NewState, Previous, EstimatedVisitorCount);
 
+	if (NewState == EGodfreyVisitorSenseState::Approaching)
+	{
+		RequestPromptCacheWarm();
+	}
+
 	if (NewState == EGodfreyVisitorSenseState::Empty)
 	{
 		if (UGodfreyVisitorBriefingComponent* Briefing = ResolveVisitorBriefing())
@@ -1139,6 +1149,7 @@ void UGodfreyVisitorPresenceComponent::SetSenseState(EGodfreyVisitorSenseState N
 		}
 		bBlockPresenceWelcomeUntilVacated = false;
 		bPresenceWelcomeDeliveredThisVisit = false;
+		AbortArrivalCardWelcome(TEXT("zone-empty"));
 		CancelPostFarewellSuccessor(TEXT("zone-empty"));
 	}
 
@@ -1187,13 +1198,85 @@ void UGodfreyVisitorPresenceComponent::TryPresenceEngage()
 		if (Briefing->TryPlay())
 		{
 			UE_LOG(LogGodfreyVision, Log,
-				TEXT("VisitorPresence: holding Welcome for arrival briefing (inDialog=%d)."),
-				PerformerState->IsInDialog() ? 1 : 0);
+				TEXT("VisitorPresence: holding Welcome speak for arrival briefing (inDialog will start — Greeting while card)."));
+			StartArrivalCardWelcome();
 			return;
 		}
 	}
 
 	CompletePresenceEngage();
+}
+
+void UGodfreyVisitorPresenceComponent::StartArrivalCardWelcome()
+{
+	if (bPresenceWelcomePrefetchActive || bPresenceWelcomeDeliveredThisVisit)
+	{
+		return;
+	}
+
+	bPresenceWelcomePrefetchActive = true;
+	if (AnimationBridge)
+	{
+		AnimationBridge->ArmPresenceWelcomeEngage();
+		AnimationBridge->SetHoldEngageGreeting(true);
+	}
+	bPresenceFarewellRequested = false;
+	bPendingFarewellSpeak = false;
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: arrival-card Welcome — Greeting now, prefetch speak (held audible)."));
+	if (PerformerState)
+	{
+		PerformerState->NotifyVisitorEngaged();
+	}
+
+	if (!bSpeakWelcomeOnPresence)
+	{
+		return;
+	}
+	if (WelcomeSpeakPrompt.TrimStartAndEnd().IsEmpty())
+	{
+		UE_LOG(LogGodfreyVision, Warning, TEXT("VisitorPresence: welcome prefetch skipped — empty WelcomeSpeakPrompt."));
+		return;
+	}
+
+	UGodfreyDirectSpeechComponent* Speech = ResolveDirectSpeech();
+	if (!Speech)
+	{
+		UE_LOG(LogGodfreyVision, Error,
+			TEXT("VisitorPresence: welcome prefetch failed — no GodfreyDirectSpeechComponent."));
+		return;
+	}
+
+	const FString Prompt = WelcomeSpeakPrompt.TrimStartAndEnd();
+	const bool bOk = Speech->AskGodfreyHeldAudible(Prompt);
+	UE_LOG(LogGodfreyVision, Log,
+		TEXT("VisitorPresence: welcome prefetch AskGodfreyHeldAudible ok=%d prompt_len=%d"),
+		bOk ? 1 : 0,
+		Prompt.Len());
+}
+
+void UGodfreyVisitorPresenceComponent::AbortArrivalCardWelcome(const TCHAR* Reason)
+{
+	if (!bPresenceWelcomePrefetchActive)
+	{
+		return;
+	}
+	bPresenceWelcomePrefetchActive = false;
+	if (AnimationBridge)
+	{
+		AnimationBridge->SetHoldEngageGreeting(false);
+	}
+	if (UGodfreyDirectSpeechComponent* Speech = ResolveDirectSpeech())
+	{
+		Speech->AbortCurrentStream(Reason ? Reason : TEXT("arrival-card cancelled"));
+	}
+	if (PerformerState && PerformerState->IsInDialog())
+	{
+		UE_LOG(LogGodfreyVision, Log,
+			TEXT("VisitorPresence: aborting arrival-card Welcome (%s) — return to SeaIdle."),
+			Reason ? Reason : TEXT("cancel"));
+		PerformerState->CancelEngageReturnToSeaIdle();
+	}
 }
 
 void UGodfreyVisitorPresenceComponent::CompletePresenceEngage()
@@ -1236,6 +1319,35 @@ void UGodfreyVisitorPresenceComponent::CompletePresenceEngage()
 void UGodfreyVisitorPresenceComponent::HandleVisitorBriefingFinished()
 {
 	UE_LOG(LogGodfreyVision, Log, TEXT("VisitorPresence: arrival briefing finished."));
+	if (AnimationBridge)
+	{
+		AnimationBridge->SetHoldEngageGreeting(false);
+	}
+
+	if (bPresenceWelcomePrefetchActive)
+	{
+		bPresenceWelcomePrefetchActive = false;
+		bPresenceWelcomeDeliveredThisVisit = true;
+		CancelPostFarewellSuccessor(TEXT("welcome-delivered"));
+		if (UGodfreyDirectSpeechComponent* Speech = ResolveDirectSpeech())
+		{
+			Speech->ReleaseHeldAudiblePlayback();
+			AActor* const Godfrey = ResolveGodfreyActor();
+			const bool bUtteranceReady = Speech->IsStreaming()
+				|| UGodfreyPcmStreamSession::IsCharacterAudiblePlaybackActive(Godfrey);
+			if (bUtteranceReady)
+			{
+				UE_LOG(LogGodfreyVision, Log,
+					TEXT("VisitorPresence: released welcome audible hold — speak as soon as ACE is ready."));
+				return;
+			}
+		}
+		UE_LOG(LogGodfreyVision, Log,
+			TEXT("VisitorPresence: welcome prefetch not streaming — AskGodfrey now."));
+		RequestWelcomeSpeak();
+		return;
+	}
+
 	CompletePresenceEngage();
 }
 
@@ -1268,6 +1380,45 @@ UGodfreyVisitorBriefingComponent* UGodfreyVisitorPresenceComponent::ResolveVisit
 		bBriefingFinishedBound = true;
 	}
 	return Briefing;
+}
+
+void UGodfreyVisitorPresenceComponent::RequestPromptCacheWarm()
+{
+	FString BaseUrl;
+	if (const UGodfreyDirectSpeechComponent* Speech = ResolveDirectSpeech())
+	{
+		BaseUrl = Speech->GodfreyBrainBaseUrl;
+	}
+	if (BaseUrl.IsEmpty())
+	{
+		BaseUrl = TEXT("http://localhost:3000");
+	}
+	while (BaseUrl.EndsWith(TEXT("/")))
+	{
+		BaseUrl.LeftChopInline(1);
+	}
+
+	const FString Url = BaseUrl + TEXT("/api/godfrey/prompt-cache-warm");
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
+	Request->SetURL(Url);
+	Request->SetVerb(TEXT("POST"));
+	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	Request->SetContentAsString(TEXT("{\"reason\":\"approaching\"}"));
+	Request->OnProcessRequestComplete().BindLambda(
+		[](FHttpRequestPtr /*Req*/, FHttpResponsePtr Response, bool bConnected)
+		{
+			UE_LOG(LogGodfreyVision, Log,
+				TEXT("VisitorPresence: prompt-cache warm ok=%d code=%d"),
+				bConnected ? 1 : 0,
+				Response.IsValid() ? Response->GetResponseCode() : 0);
+		});
+	if (!Request->ProcessRequest())
+	{
+		UE_LOG(LogGodfreyVision, Warning,
+			TEXT("VisitorPresence: prompt-cache warm request failed to start (%s)"), *Url);
+		return;
+	}
+	UE_LOG(LogGodfreyVision, Log, TEXT("VisitorPresence: prompt-cache warm requested (%s)"), *Url);
 }
 
 void UGodfreyVisitorPresenceComponent::RequestWelcomeSpeak()
@@ -1319,6 +1470,11 @@ void UGodfreyVisitorPresenceComponent::HandleWelcomeSpeakTimer()
 
 void UGodfreyVisitorPresenceComponent::TryPresenceFarewell()
 {
+	if (bPresenceWelcomePrefetchActive)
+	{
+		AbortArrivalCardWelcome(TEXT("left-during-arrival-card"));
+		return;
+	}
 	if (!bFarewellOnAbsence || !PerformerState)
 	{
 		return;
@@ -1588,6 +1744,7 @@ void UGodfreyVisitorPresenceComponent::BeginSuccessorEncounter(const TCHAR* Reas
 	bPostFarewellSpeechRequested = false;
 	PostFarewellSuccessorCountdown = -1.f;
 	bPresenceWelcomeDeliveredThisVisit = false;
+	AbortArrivalCardWelcome(TEXT("successor-encounter"));
 	bPresenceFarewellRequested = false;
 	bPendingFarewellSpeak = false;
 	if (UGodfreyVisitorBriefingComponent* Briefing = ResolveVisitorBriefing())

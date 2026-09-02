@@ -12,7 +12,7 @@ class UGodfreyVoiceInputComponent;
 /**
  * Exhibition queue poll — mirrors legacy BP_GodfreyApiTest timer (~1s).
  * GET /api/exhibition/unreal-tts-status:
- *   - phase=awaiting_reply → NotifyReplyIncoming (listening while LLM runs)
+ *   - phase=awaiting_reply → NotifyReplyIncoming (thinking while LLM runs)
  *   - ready → PullQueuedGodfreySpeechToAudio → ACE on CharacterForAce.
  *
  * Optionally auto-spawns DirectSpeech + VoiceInput on the same owner so the

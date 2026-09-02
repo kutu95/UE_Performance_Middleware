@@ -34,6 +34,8 @@
 
 #include "Interfaces/IHttpResponse.h"
 
+#include "Misc/Guid.h"
+
 #include "Misc/ScopeLock.h"
 
 #include "Serialization/JsonSerializer.h"
@@ -126,75 +128,53 @@ AActor* ResolveExhibitionCharacterForAce(UObject* WorldContextObject, AActor* Ex
 
 
 void UAsyncActionStreamGodfreySpeech::LogGodfreyPerformanceEventsFromStatusJson(const TSharedPtr<FJsonObject>& JsonObj)
-
 {
+	IngestPerformanceEventsFromJson(JsonObj);
+}
 
+void UAsyncActionStreamGodfreySpeech::IngestPerformanceEventsFromJson(const TSharedPtr<FJsonObject>& JsonObj)
+{
 	if (!JsonObj.IsValid())
-
 	{
-
 		return;
-
 	}
 
 	const TArray<TSharedPtr<FJsonValue>>* Events = nullptr;
-
-	if (!JsonObj->TryGetArrayField(TEXT("performanceEvents"), Events) || Events == nullptr || Events->Num() == 0)
-
+	if (!JsonObj->TryGetArrayField(TEXT("performanceEvents"), Events) || Events == nullptr)
 	{
-
-		UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("Godfrey performance events: none"));
-
 		return;
-
 	}
 
-	UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("Godfrey performance events received:"));
-
-	for (const TSharedPtr<FJsonValue>& Entry : *Events)
-
+	for (int32 Index = PerformanceEventsForwarded; Index < Events->Num(); ++Index)
 	{
-
+		const TSharedPtr<FJsonValue>& Entry = (*Events)[Index];
 		if (!Entry.IsValid() || Entry->Type != EJson::Object)
-
 		{
-
+			PerformanceEventsForwarded = Index + 1;
 			continue;
-
 		}
 
 		const TSharedPtr<FJsonObject> EvObj = Entry->AsObject();
-
 		if (!EvObj.IsValid())
-
 		{
-
+			PerformanceEventsForwarded = Index + 1;
 			continue;
-
 		}
 
 		FString Type;
-
 		FString Value;
-
 		FString Raw;
-
 		EvObj->TryGetStringField(TEXT("type"), Type);
-
 		EvObj->TryGetStringField(TEXT("value"), Value);
-
 		EvObj->TryGetStringField(TEXT("raw"), Raw);
 
-		UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("- %s: %s (%s)"), *Type, *Value, *Raw);
-
-		UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("Broadcasting performance cue: type=%s value=%s raw=%s"), *Type, *Value, *Raw);
-
+		UE_LOG(LogGodfreySpeechStreamNode, Log,
+			TEXT("Godfrey performance cue %d: type=%s value=%s raw=%s"),
+			Index, *Type, *Value, *Raw);
 		OnPerformanceCue.Broadcast(Type, Value, Raw);
-
 		TryForwardPerformanceCueToPerformer(Type, Value, Raw);
-
+		PerformanceEventsForwarded = Index + 1;
 	}
-
 }
 
 
@@ -415,6 +395,16 @@ void UAsyncActionStreamGodfreySpeech::Activate()
 
 
 
+	if (bHoldAudibleUntilReleased)
+
+	{
+
+		StreamSession->SetHoldAudibleUntilReleased(true);
+
+	}
+
+
+
 	UE_LOG(LogGodfreySpeechStreamNode, Log, TEXT("Stream start requested. BaseUrl=%s Provider=%s SampleRate=%d Channels=%d ClientRequestT0=%.6f"),
 
 		*GodfreyBrainBaseUrl, *ProviderName.ToString(), SampleRate, NumChannels, ClientRequestT0);
@@ -438,11 +428,121 @@ FString UAsyncActionStreamGodfreySpeech::BuildStreamUrl() const
 
 
 FString UAsyncActionStreamGodfreySpeech::BuildExhibitionTtsStatusUrl() const
-
 {
-
 	return NormalizeGodfreyBaseUrl(GodfreyBrainBaseUrl) + TEXT("/api/exhibition/unreal-tts-status");
+}
 
+FString UAsyncActionStreamGodfreySpeech::BuildLivePerformanceEventsUrl() const
+{
+	return NormalizeGodfreyBaseUrl(GodfreyBrainBaseUrl)
+		+ TEXT("/api/godfrey/speak/performance-events?requestId=")
+		+ SpeakRequestId;
+}
+
+void UAsyncActionStreamGodfreySpeech::StartLivePerformanceCuePoll()
+{
+	if (SpeakRequestId.IsEmpty())
+	{
+		return;
+	}
+
+	UWorld* World = IsValid(CharacterForAce) ? CharacterForAce->GetWorld() : nullptr;
+	if (!World && IsValid(WorldContextObject))
+	{
+		World = WorldContextObject->GetWorld();
+	}
+	if (!World)
+	{
+		return;
+	}
+
+	bLivePerformanceEventsClosed = false;
+	TWeakObjectPtr<UAsyncActionStreamGodfreySpeech> WeakThis(this);
+	World->GetTimerManager().SetTimer(
+		PerformanceCuePollTimerHandle,
+		FTimerDelegate::CreateLambda([WeakThis]()
+		{
+			if (UAsyncActionStreamGodfreySpeech* Strong = WeakThis.Get())
+			{
+				Strong->PollLivePerformanceEventsOnce();
+			}
+		}),
+		0.25f,
+		true);
+	PollLivePerformanceEventsOnce();
+}
+
+void UAsyncActionStreamGodfreySpeech::StopLivePerformanceCuePoll()
+{
+	UWorld* World = IsValid(CharacterForAce) ? CharacterForAce->GetWorld() : nullptr;
+	if (!World && IsValid(WorldContextObject))
+	{
+		World = WorldContextObject->GetWorld();
+	}
+	if (World)
+	{
+		World->GetTimerManager().ClearTimer(PerformanceCuePollTimerHandle);
+	}
+}
+
+void UAsyncActionStreamGodfreySpeech::PollLivePerformanceEventsOnce()
+{
+	if (SpeakRequestId.IsEmpty() || bPerformanceCuePollInFlight)
+	{
+		return;
+	}
+	if (bDidFinish && bLivePerformanceEventsClosed)
+	{
+		StopLivePerformanceCuePoll();
+		return;
+	}
+
+	FHttpModule& Http = FHttpModule::Get();
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = Http.CreateRequest();
+	Request->SetURL(BuildLivePerformanceEventsUrl());
+	Request->SetVerb(TEXT("GET"));
+	Request->SetHeader(TEXT("Accept"), TEXT("application/json"));
+	Request->SetTimeout(5.f);
+
+	bPerformanceCuePollInFlight = true;
+	const TWeakObjectPtr<UAsyncActionStreamGodfreySpeech> WeakThis(this);
+	Request->OnProcessRequestComplete().BindLambda(
+		[WeakThis](FHttpRequestPtr /*HttpRequest*/, FHttpResponsePtr HttpResponse, bool bConnectedSuccessfully)
+		{
+			UAsyncActionStreamGodfreySpeech* Strong = WeakThis.Get();
+			if (!IsValid(Strong))
+			{
+				return;
+			}
+			Strong->bPerformanceCuePollInFlight = false;
+			if (!bConnectedSuccessfully || !HttpResponse.IsValid() || HttpResponse->GetResponseCode() < 200
+				|| HttpResponse->GetResponseCode() >= 300)
+			{
+				return;
+			}
+
+			TSharedPtr<FJsonObject> JsonObj;
+			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(HttpResponse->GetContentAsString());
+			if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid())
+			{
+				return;
+			}
+
+			Strong->IngestPerformanceEventsFromJson(JsonObj);
+			bool bFound = false;
+			bool bClosed = false;
+			JsonObj->TryGetBoolField(TEXT("found"), bFound);
+			JsonObj->TryGetBoolField(TEXT("closed"), bClosed);
+			if (bFound && bClosed)
+			{
+				Strong->bLivePerformanceEventsClosed = true;
+				if (Strong->bDidFinish)
+				{
+					Strong->StopLivePerformanceCuePoll();
+				}
+			}
+		});
+	Request->ProcessRequest();
 }
 
 
@@ -820,13 +920,19 @@ void UAsyncActionStreamGodfreySpeech::StartSpeakStreamPcmPost()
 
 		BodyObject->SetNumberField(TEXT("numChannels"), NumChannels);
 
+		SpeakRequestId = QueuedTtsRequestId;
+
 	}
 
 	else
 
 	{
 
+		SpeakRequestId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+
 		BodyObject->SetStringField(TEXT("text"), PromptText);
+
+		BodyObject->SetStringField(TEXT("speakRequestId"), SpeakRequestId);
 
 		BodyObject->SetNumberField(TEXT("sampleRate"), SampleRate);
 
@@ -1033,9 +1139,13 @@ void UAsyncActionStreamGodfreySpeech::StartSpeakStreamPcmPost()
 
 	UE_LOG(LogGodfreySpeechStreamNode, Log,
 
-		TEXT("HTTP stream request dispatched with incremental body receive (GetContent will stay empty per engine contract). RequestStartPlatform=%.6f"),
+		TEXT("HTTP stream request dispatched with incremental body receive (GetContent will stay empty per engine contract). RequestStartPlatform=%.6f speakRequestId=%s"),
 
-		HttpRequestStartSeconds);
+		HttpRequestStartSeconds,
+
+		*SpeakRequestId);
+
+	StartLivePerformanceCuePoll();
 
 }
 
@@ -1531,17 +1641,41 @@ void UAsyncActionStreamGodfreySpeech::TryFinishStreamAfterHttpComplete()
 
 		}
 
-		UE_LOG(LogGodfreySpeechStreamNode, Warning,
+		if (Elapsed >= 119.0)
 
-			TEXT("Forcing EndAudioSamples after %.1fs defer (Unmatched=%.3fs Sent=%.1fs Wall=%.1fs) — near end or safety deadline."),
+		{
 
-			Elapsed,
+			UE_LOG(LogGodfreySpeechStreamNode, Warning,
 
-			StreamSession->GetUnmatchedAudioSeconds(),
+				TEXT("Forcing EndAudioSamples after %.1fs defer (Unmatched=%.3fs Sent=%.1fs Wall=%.1fs) — 120s stall deadline."),
 
-			StreamSession->GetSentAudioSeconds(),
+				Elapsed,
 
-			StreamSession->GetPlaybackWallSeconds());
+				StreamSession->GetUnmatchedAudioSeconds(),
+
+				StreamSession->GetSentAudioSeconds(),
+
+				StreamSession->GetPlaybackWallSeconds());
+
+		}
+
+		else
+
+		{
+
+			UE_LOG(LogGodfreySpeechStreamNode, Log,
+
+				TEXT("Flushing EndAudioSamples after audible tail hush (elapsed=%.1fs Unmatched=%.3fs Sent=%.1fs Wall=%.1fs)."),
+
+				Elapsed,
+
+				StreamSession->GetUnmatchedAudioSeconds(),
+
+				StreamSession->GetSentAudioSeconds(),
+
+				StreamSession->GetPlaybackWallSeconds());
+
+		}
 
 	}
 
@@ -1906,6 +2040,7 @@ void UAsyncActionStreamGodfreySpeech::Cancel()
 	if (World)
 	{
 		World->GetTimerManager().ClearTimer(HttpBodyDrainTimerHandle);
+		World->GetTimerManager().ClearTimer(PerformanceCuePollTimerHandle);
 	}
 	bHttpBodyDrainCatchUpDeferred = false;
 	AceEndCatchUpWaitStartPlatformSeconds = -1.0;
@@ -1963,6 +2098,7 @@ void UAsyncActionStreamGodfreySpeech::FailAndStop(const FString& ErrorMessage)
 	if (World)
 	{
 		World->GetTimerManager().ClearTimer(HttpBodyDrainTimerHandle);
+		World->GetTimerManager().ClearTimer(PerformanceCuePollTimerHandle);
 	}
 	bHttpBodyDrainCatchUpDeferred = false;
 	AceEndCatchUpWaitStartPlatformSeconds = -1.0;

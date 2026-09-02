@@ -4,6 +4,7 @@
 #include "GodfreyFaceEyeLookAtAnimInstance.h"
 #include "GodfreyDiagnostics.h"
 #include "GodfreyPerformanceLog.h"
+#include "GodfreySpeechLipCurves.h"
 #include "GodfreyPerformanceStateComponent.h"
 #include "GodfreyExhibitionQueuePollComponent.h"
 #include "GodfreyVisitorPresenceComponent.h"
@@ -368,8 +369,7 @@ static FString ResolveGazeSafeActionStem(const FString& Stem)
 		|| Lower.Contains(TEXT("looktosea"))
 		|| Lower.Contains(TEXT("lookingaway"))
 		|| Lower.Contains(TEXT("reflectivepause"))
-		|| Lower.Contains(TEXT("wereyouafraid"))
-		|| Lower.Contains(TEXT("concerned")))
+		|| Lower.Contains(TEXT("wereyouafraid")))
 	{
 		if (Lower.Contains(TEXT("thinking")))
 		{
@@ -392,16 +392,26 @@ static FString ResolveGazeSafeActionStem(const FString& Stem)
 static constexpr int32 GodfreySpeakingIdleSegmentLoopCount = 1;
 static constexpr float GestureIntensityDefault = 1.f;
 
+/** Generic speaking-pool allowlist. Meaning-bearing takes (SummingUpHisCase, WantingToBeUnderstood,
+ *  DescribingWhere, SpeakingExplainDanger, story beats) are Brain [gesture:] only. */
+static const TCHAR* GodfreyGenericSpeakingPoolStems[] = {
+	TEXT("Explaining_01"),
+	TEXT("Explaining_02"),
+	TEXT("ExplainingFirmly_01"),
+	TEXT("SpeakingCalmExplanation_01"),
+	TEXT("SpeakingGentleEmphasis_01"),
+	TEXT("SpeakingDescribeSequence_01"),
+};
+static constexpr int32 GodfreyGenericSpeakingPoolStemCount = UE_ARRAY_COUNT(GodfreyGenericSpeakingPoolStems);
+
 static const TCHAR* GodfreyPrioritySpeakingStems[] = {
 	TEXT("Explaining_01"),
 	TEXT("Explaining_02"),
 	TEXT("ExplainingFirmly_01"),
-	TEXT("DescribingWhere_01"),
-	TEXT("WantingToBeUnderstood_01"),
-	TEXT("SummingUpHisCase_01"),
 };
 static constexpr int32 GodfreyPrioritySpeakingStemCount = UE_ARRAY_COUNT(GodfreyPrioritySpeakingStems);
-static constexpr int32 GodfreyPrioritySpeakingWeight = 3;
+/** Equal shuffle — a 3× weight made Explaining_01 repeat across long utterances. */
+static constexpr int32 GodfreyPrioritySpeakingWeight = 1;
 
 static const TCHAR* GodfreyPriorityGreetingStems[] = {
 	TEXT("GreetingWelcome_03"),
@@ -414,6 +424,108 @@ static bool GodfreyIsShelvedAPoseStem(const FString& Stem)
 {
 	return Stem.Equals(TEXT("WantingYouToHear_01"), ESearchCase::IgnoreCase)
 		|| Stem.Equals(TEXT("GreetingWelcome_02"), ESearchCase::IgnoreCase);
+}
+
+static FString GodfreyNormalizedLibraryStem(const FString& InStem)
+{
+	FString Stem = InStem.TrimStartAndEnd();
+	if (Stem.StartsWith(TEXT("AS_"), ESearchCase::IgnoreCase))
+	{
+		Stem.RightChopInline(3);
+	}
+	else if (Stem.StartsWith(TEXT("AM_"), ESearchCase::IgnoreCase))
+	{
+		Stem.RightChopInline(3);
+	}
+	if (Stem.EndsWith(TEXT("_EyeFixed"), ESearchCase::IgnoreCase))
+	{
+		Stem.LeftChopInline(9);
+	}
+	return Stem;
+}
+
+/** Exhibition Idle* overlays — never the in-dialog conversation hold (planted DefaultSlot stance is separate). */
+static bool GodfreyIsConversationIdleStem(const FString& InStem)
+{
+	const FString Stem = GodfreyNormalizedLibraryStem(InStem);
+	if (Stem.IsEmpty())
+	{
+		return false;
+	}
+	return Stem.StartsWith(TEXT("Idle"), ESearchCase::IgnoreCase)
+		|| Stem.StartsWith(TEXT("TransitionIdle"), ESearchCase::IgnoreCase)
+		|| Stem.Equals(TEXT("TransitionSpeakingToIdle_01"), ESearchCase::IgnoreCase);
+}
+
+static bool GodfreyIsRareThinkingStem(const FString& InStem)
+{
+	const FString Stem = GodfreyNormalizedLibraryStem(InStem);
+	return Stem.Contains(TEXT("Coy"), ESearchCase::IgnoreCase)
+		|| Stem.Contains(TEXT("ScratchingHead"), ESearchCase::IgnoreCase);
+}
+
+static bool GodfreyIsPresenceOrGreetingStem(const FString& InStem)
+{
+	FString Stem = InStem;
+	if (Stem.StartsWith(TEXT("AS_"), ESearchCase::IgnoreCase))
+	{
+		Stem.RightChopInline(3);
+	}
+	else if (Stem.StartsWith(TEXT("AM_"), ESearchCase::IgnoreCase))
+	{
+		Stem.RightChopInline(3);
+	}
+	if (Stem.EndsWith(TEXT("_EyeFixed"), ESearchCase::IgnoreCase))
+	{
+		Stem.LeftChopInline(9);
+	}
+	return Stem.StartsWith(TEXT("Greeting"), ESearchCase::IgnoreCase)
+		|| Stem.StartsWith(TEXT("Listening"), ESearchCase::IgnoreCase)
+		|| Stem.StartsWith(TEXT("Idle"), ESearchCase::IgnoreCase)
+		|| Stem.StartsWith(TEXT("Farewell"), ESearchCase::IgnoreCase)
+		|| Stem.StartsWith(TEXT("Engage"), ESearchCase::IgnoreCase)
+		|| Stem.StartsWith(TEXT("TurningFromSea"), ESearchCase::IgnoreCase)
+		|| Stem.Contains(TEXT("Welcome"), ESearchCase::IgnoreCase);
+}
+
+/** Speaking-body takes Brain may choose. Presence / listen / idle / farewell stay Unreal-owned. */
+static bool GodfreyIsBrainSpeakingBodyStem(const FString& InStem)
+{
+	FString Stem = InStem;
+	if (Stem.StartsWith(TEXT("AS_"), ESearchCase::IgnoreCase))
+	{
+		Stem.RightChopInline(3);
+	}
+	else if (Stem.StartsWith(TEXT("AM_"), ESearchCase::IgnoreCase))
+	{
+		Stem.RightChopInline(3);
+	}
+	if (Stem.EndsWith(TEXT("_EyeFixed"), ESearchCase::IgnoreCase))
+	{
+		Stem.LeftChopInline(9);
+	}
+	if (Stem.IsEmpty() || GodfreyIsShelvedAPoseStem(Stem) || GodfreyIsPresenceOrGreetingStem(Stem))
+	{
+		return false;
+	}
+	return !Stem.StartsWith(TEXT("Transition"), ESearchCase::IgnoreCase);
+}
+
+static bool GodfreyIsGenericSpeakingPoolStem(const FString& Stem)
+{
+	for (int32 i = 0; i < GodfreyGenericSpeakingPoolStemCount; ++i)
+	{
+		if (Stem.Equals(GodfreyGenericSpeakingPoolStems[i], ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool GodfreyIsBrainCuedSpeakingStem(const FString& Stem)
+{
+	return !GodfreyIsGenericSpeakingPoolStem(Stem);
 }
 
 static void GodfreyInjectStems(TArray<FString>& Pool, const TCHAR* const* Stems, int32 Count)
@@ -3029,6 +3141,13 @@ void UGodfreyPerformerAnimationBridgeComponent::BeginPlay()
 	LoopedBodySlotMontages.Empty();
 	BodySlotRemappedMontages.Empty();
 	ActiveSpeakingIdlePlayMontage = nullptr;
+	ActiveNamedActionPlayMontage = nullptr;
+	LastPlayedBodyMontage = nullptr;
+	PendingBrainSpeakingActionId.Empty();
+	QueuedBrainSpeakingActionIds.Reset();
+	LastBrainSpeakingActionId.Empty();
+	UsedSpeakingStemsThisUtterance.Reset();
+	SuppressSpeakingIdleUntilWorldTime = -1.0;
 	SpeakingIdleMontageCycleSeconds = 0.f;
 	SpeakingIdleMontageWallCycleSeconds = 0.f;
 	SpeakingIdleCycleStartWorldTime = -1.0;
@@ -4551,6 +4670,353 @@ void UGodfreyPerformerAnimationBridgeComponent::SuppressSpeakingIdleUntil(const 
 	SuppressSpeakingIdleUntilWorldTime = FMath::Max(SuppressSpeakingIdleUntilWorldTime, WorldTimeSeconds);
 }
 
+bool UGodfreyPerformerAnimationBridgeComponent::IsNamedTakeHoldContext(const TCHAR* ContextLabel)
+{
+	if (!ContextLabel || !*ContextLabel)
+	{
+		return false;
+	}
+	const FString C(ContextLabel);
+	return C.Equals(TEXT("NamedAction"), ESearchCase::IgnoreCase)
+		|| C.Equals(TEXT("NamedActionTravel"), ESearchCase::IgnoreCase);
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::MontageLooksLikePresenceOrGreeting(const UAnimMontage* Montage)
+{
+	if (!Montage)
+	{
+		return false;
+	}
+	if (GodfreyIsPresenceOrGreetingStem(Montage->GetName()))
+	{
+		return true;
+	}
+	if (const UAnimSequence* Seq = ExtractPrimarySequenceFromMontage(Montage))
+	{
+		return GodfreyIsPresenceOrGreetingStem(Seq->GetName());
+	}
+	return false;
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::IsSpeakingIdleSuppressed() const
+{
+	if (const UWorld* World = GetWorld())
+	{
+		return World->GetTimeSeconds() < SuppressSpeakingIdleUntilWorldTime;
+	}
+	return false;
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::ShouldHoldNamedPerformanceTake() const
+{
+	UAnimMontage* const Named = ActiveNamedActionPlayMontage.Get();
+	if (!Named)
+	{
+		return false;
+	}
+	if (MontageLooksLikePresenceOrGreeting(Named))
+	{
+		return false;
+	}
+	if (UAnimInstance* const AnimInst = ResolveAnimInstance(TEXT("NamedTakeHold")))
+	{
+		return AnimInst->Montage_IsActive(Named);
+	}
+	return IsSpeakingIdleSuppressed();
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::IsBrainSpeakingBodyAction(const FString& CueId)
+{
+	return GodfreyIsBrainSpeakingBodyStem(CueId);
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::RememberBrainSpeakingAction(const FString& CueId)
+{
+	const FString Stem = NormalizePerformanceCueId(CueId);
+	if (!IsBrainSpeakingBodyAction(Stem))
+	{
+		return;
+	}
+	LastBrainSpeakingActionId = Stem;
+	PendingBrainSpeakingActionId.Empty();
+	MarkSpeakingStemUsedThisUtterance(Stem);
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::WasSpeakingStemUsedThisUtterance(const FString& Stem) const
+{
+	const FString Normalized = NormalizePerformanceCueId(Stem);
+	if (Normalized.IsEmpty())
+	{
+		return false;
+	}
+	for (const FString& Used : UsedSpeakingStemsThisUtterance)
+	{
+		if (Used.Equals(Normalized, ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::MarkSpeakingStemUsedThisUtterance(const FString& Stem)
+{
+	const FString Normalized = NormalizePerformanceCueId(Stem);
+	if (Normalized.IsEmpty() || WasSpeakingStemUsedThisUtterance(Normalized))
+	{
+		return;
+	}
+	UsedSpeakingStemsThisUtterance.Add(Normalized);
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::ClearBrainSpeakingActionMemory(const TCHAR* Reason)
+{
+	if (PendingBrainSpeakingActionId.IsEmpty() && LastBrainSpeakingActionId.IsEmpty()
+		&& QueuedBrainSpeakingActionIds.Num() == 0
+		&& UsedSpeakingStemsThisUtterance.Num() == 0)
+	{
+		return;
+	}
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: clearing Brain speaking take memory (%s last='%s' pending='%s' queued=%d used=%d)."),
+		Reason ? Reason : TEXT("clear"),
+		*LastBrainSpeakingActionId,
+		*PendingBrainSpeakingActionId,
+		QueuedBrainSpeakingActionIds.Num(),
+		UsedSpeakingStemsThisUtterance.Num());
+	PendingBrainSpeakingActionId.Empty();
+	QueuedBrainSpeakingActionIds.Reset();
+	LastBrainSpeakingActionId.Empty();
+	UsedSpeakingStemsThisUtterance.Reset();
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::TryPlayBrainSpeakingAction(const FString& CueId,
+	const TCHAR* Reason, const bool bIgnorePresenceLock)
+{
+	const FString Stem = NormalizePerformanceCueId(CueId);
+	if (!IsBrainSpeakingBodyAction(Stem))
+	{
+		return false;
+	}
+	if (PlayNamedPerformanceAction(Stem, true, bIgnorePresenceLock))
+	{
+		RememberBrainSpeakingAction(Stem);
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: Brain speaking take '%s' (%s)."),
+			*Stem,
+			Reason ? Reason : TEXT("cue"));
+		return true;
+	}
+	return false;
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::EnqueueOrPlayBrainSpeakingAction(const FString& CueId,
+	const TCHAR* Reason)
+{
+	const FString Stem = NormalizePerformanceCueId(CueId);
+	if (!IsBrainSpeakingBodyAction(Stem))
+	{
+		return false;
+	}
+
+	auto AlreadyQueued = [this, &Stem]()
+	{
+		if (Stem.Equals(PendingBrainSpeakingActionId, ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+		for (const FString& Queued : QueuedBrainSpeakingActionIds)
+		{
+			if (Queued.Equals(Stem, ESearchCase::IgnoreCase))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	if (WasSpeakingStemUsedThisUtterance(Stem) || AlreadyQueued())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: skip Brain speaking take '%s' (%s) — already used or queued this utterance."),
+			*Stem,
+			Reason ? Reason : TEXT("cue"));
+		return true;
+	}
+
+	const bool bHoldPlaying = ShouldHoldNamedPerformanceTake();
+	const bool bHaveStash = !PendingBrainSpeakingActionId.IsEmpty();
+	if (bHoldPlaying || bHaveStash)
+	{
+		QueuedBrainSpeakingActionIds.Add(Stem);
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: queued Brain speaking take '%s' (%s) behind %s (queue=%d)."),
+			*Stem,
+			Reason ? Reason : TEXT("cue"),
+			bHoldPlaying
+				? (ActiveNamedActionPlayMontage ? *ActiveNamedActionPlayMontage->GetName() : TEXT("live-take"))
+				: *PendingBrainSpeakingActionId,
+			QueuedBrainSpeakingActionIds.Num());
+		return true;
+	}
+
+	if (!bIsSpeaking && ShouldSuppressPresenceOwnedBodyCues())
+	{
+		PendingBrainSpeakingActionId = Stem;
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: stashed Brain speaking take '%s' until speak-start (%s)."),
+			*Stem,
+			Reason ? Reason : TEXT("cue"));
+		return true;
+	}
+
+	return TryPlayBrainSpeakingAction(Stem, Reason, true);
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::TryPlayNextQueuedBrainSpeakingTake(const TCHAR* Reason)
+{
+	while (QueuedBrainSpeakingActionIds.Num() > 0)
+	{
+		const FString Next = QueuedBrainSpeakingActionIds[0];
+		QueuedBrainSpeakingActionIds.RemoveAt(0);
+		if (TryPlayBrainSpeakingAction(Next, Reason, true))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::ApplyPendingBrainSpeakingTake(const TCHAR* Reason)
+{
+	if (!PendingBrainSpeakingActionId.IsEmpty())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: applying stashed Brain speaking take '%s' (%s)."),
+			*PendingBrainSpeakingActionId,
+			Reason ? Reason : TEXT("speak-start"));
+		if (TryPlayBrainSpeakingAction(PendingBrainSpeakingActionId, Reason, true))
+		{
+			return true;
+		}
+	}
+	return TryPlayNextQueuedBrainSpeakingTake(Reason);
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::IsReplacedOverlayMontage(UAnimMontage* EndedMontage) const
+{
+	if (!EndedMontage)
+	{
+		return false;
+	}
+	UAnimMontage* const LiveIdle = ActiveSpeakingIdlePlayMontage.Get();
+	UAnimMontage* const LiveNamed = ActiveNamedActionPlayMontage.Get();
+	return LiveIdle && LiveIdle != EndedMontage && LiveNamed != EndedMontage;
+}
+
+bool UGodfreyPerformerAnimationBridgeComponent::SustainBrainSpeakingTake(const TCHAR* Reason)
+{
+	if (!bBrainOwnsSpeakingBody || LastBrainSpeakingActionId.IsEmpty())
+	{
+		return false;
+	}
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		return true;
+	}
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: sustaining Brain speaking take '%s' (%s) — not a UE pool pick."),
+		*LastBrainSpeakingActionId,
+		Reason ? Reason : TEXT("sustain"));
+	return TryPlayBrainSpeakingAction(LastBrainSpeakingActionId, Reason, true);
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::HoldSpeakingPoolForMontage(UAnimMontage* Montage, const TCHAR* Reason)
+{
+	if (!Montage || MontageLooksLikePresenceOrGreeting(Montage))
+	{
+		return;
+	}
+	const float HoldSeconds = FMath::Max(0.35f, Montage->GetPlayLength());
+	if (const UWorld* World = GetWorld())
+	{
+		SuppressSpeakingIdleUntil(World->GetTimeSeconds() + HoldSeconds);
+	}
+	ActiveNamedActionPlayMontage = Montage;
+	ClearSpeakingIdleChainTimer();
+	ClearDialogIdleChainTimer();
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: holding speaking pool for %.2fs (%s montage='%s')."),
+		HoldSeconds,
+		Reason ? Reason : TEXT("NamedTake"),
+		*Montage->GetName());
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::ClearNamedPerformanceTakeHold(const TCHAR* Reason)
+{
+	if (!ActiveNamedActionPlayMontage && SuppressSpeakingIdleUntilWorldTime < 0.0)
+	{
+		return;
+	}
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: releasing named-take hold (%s was='%s')."),
+		Reason ? Reason : TEXT("clear"),
+		ActiveNamedActionPlayMontage ? *ActiveNamedActionPlayMontage->GetName() : TEXT("(none)"));
+	ActiveNamedActionPlayMontage = nullptr;
+	SuppressSpeakingIdleUntilWorldTime = -1.0;
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::ConsumeFirstDialogGreetingHold(const TCHAR* Reason)
+{
+	if (bUsedFirstDialogGreetingHold && !bDialogGreetingHoldActive)
+	{
+		return;
+	}
+	bUsedFirstDialogGreetingHold = true;
+	bDialogGreetingHoldActive = false;
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: first-dialog Greeting hold consumed (%s) — later holds use Listening pool."),
+		Reason ? Reason : TEXT("consume"));
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::InterruptGreetingOverlayForSpeech()
+{
+	ConsumeFirstDialogGreetingHold(TEXT("BeginSpeaking"));
+	bHoldEngageGreeting = false;
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(EngageChainTimerHandle);
+	}
+
+	UAnimInstance* const AnimInst = ResolveAnimInstance(TEXT("InterruptGreeting"));
+	auto StopOverlay = [this, AnimInst](UAnimMontage* Montage, const TCHAR* Why)
+	{
+		if (!Montage || !AnimInst || !AnimInst->Montage_IsActive(Montage))
+		{
+			return;
+		}
+		if (ActiveNamedActionPlayMontage && Montage == ActiveNamedActionPlayMontage)
+		{
+			return;
+		}
+		constexpr float SpeechBlendOut = 0.40f;
+		AnimInst->Montage_Stop(SpeechBlendOut, Montage);
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: interrupting overlay '%s' for speech (%s, blendOut=%.2fs)."),
+			*Montage->GetName(), Why, SpeechBlendOut);
+		if (ActiveSpeakingIdlePlayMontage == Montage)
+		{
+			ActiveSpeakingIdlePlayMontage = nullptr;
+		}
+	};
+
+	StopOverlay(LastPlayedBodyMontage.Get(), TEXT("last-played"));
+	if (!ShouldHoldNamedPerformanceTake())
+	{
+		StopOverlay(ActiveSpeakingIdlePlayMontage.Get(), TEXT("thinking-or-listen-hold"));
+	}
+}
+
 UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::ResolveNamedActionMontage(const FString& CueId,
 	bool& bOutInterruptSpeakingIdle)
 {
@@ -4617,6 +5083,39 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayNamedPerformanceAction(const
 	LastActingCueType = TEXT("action");
 	LastActingCueValue = CueId;
 
+	const FString RepeatStem = NormalizePerformanceCueId(CueId);
+	if (PerformerState && PerformerState->IsInDialog() && GodfreyIsConversationIdleStem(RepeatStem))
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: skip Idle AS '%s' while discussion is active."),
+			*RepeatStem);
+		if (bIsSpeaking && !ShouldHoldNamedPerformanceTake())
+		{
+			PlaySpeakingIdleInternal(true);
+		}
+		else if (bIsThinking)
+		{
+			PlayThinkingHoldMontage(TEXT("InDialogSkipIdle"));
+		}
+		else
+		{
+			PlayAwaitingConversationHoldMontage(TEXT("InDialogSkipIdle"), true);
+		}
+		return false;
+	}
+	if (IsBrainSpeakingBodyAction(RepeatStem) && WasSpeakingStemUsedThisUtterance(RepeatStem)
+		&& (bIsSpeaking || bPostSpeechSpeakingBodyHold))
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: skip repeating speaking take '%s' this utterance — next distinct clip."),
+			*RepeatStem);
+		if (bIsSpeaking && !ShouldHoldNamedPerformanceTake())
+		{
+			PlaySpeakingIdleInternal(true);
+		}
+		return false;
+	}
+
 	if (!bIgnorePresenceLock && ShouldSuppressPresenceOwnedBodyCues())
 	{
 		const int32 PresenceInt = PerformerState
@@ -4661,8 +5160,10 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayNamedPerformanceAction(const
 		return false;
 	}
 
-	if (bInterrupt && bIsSpeaking)
+	if (bInterrupt)
 	{
+		ClearSpeakingIdleChainTimer();
+		ClearDialogIdleChainTimer();
 		if (UAnimInstance* AnimInst = IsValid(TargetSkeletalMesh) ? TargetSkeletalMesh->GetAnimInstance() : nullptr)
 		{
 			if (ActiveSpeakingIdlePlayMontage && AnimInst->Montage_IsActive(ActiveSpeakingIdlePlayMontage))
@@ -4670,16 +5171,16 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayNamedPerformanceAction(const
 				AnimInst->Montage_Stop(GetDialogIdleMontageBlendOut(), ActiveSpeakingIdlePlayMontage);
 			}
 		}
-		const float SuppressSeconds = FMath::Max(0.35f, Montage->GetPlayLength() * 0.85f);
-		if (const UWorld* World = GetWorld())
-		{
-			SuppressSpeakingIdleUntil(World->GetTimeSeconds() + SuppressSeconds);
-		}
 	}
 
 	const bool bTravel = ShouldApplyRootMotionForAction(CueId);
 	const TCHAR* const ActionContext = bTravel ? TEXT("NamedActionTravel") : TEXT("NamedAction");
-	const bool bPlayed = PlayMontageIfPossible(Montage, ActionContext, 1.f, true, false, false, !bTravel, bTravel);
+	// Chain as hold so this take is the speaking overlay: speak-start must not replace it with R14 pool.
+	const bool bPlayed = PlayMontageIfPossible(Montage, ActionContext, 1.f, true, false, true, !bTravel, bTravel);
+	if (bPlayed && IsBrainSpeakingBodyAction(CueId))
+	{
+		RememberBrainSpeakingAction(CueId);
+	}
 	UE_LOG(LogGodfreyPerformance, Log,
 		TEXT("GodfreyPerformerBridge: named action '%s' -> montage '%s' played=%d travel=%d."),
 		*CueId, *Montage->GetName(), bPlayed ? 1 : 0, bTravel ? 1 : 0);
@@ -4879,6 +5380,20 @@ void UGodfreyPerformerAnimationBridgeComponent::TickComponent(float DeltaTime, E
 	else
 	{
 		TryRecoverStuckEngageChain(DeltaTime);
+		// Baked visemes on solved takes (GreetingWelcome_03) copy onto the Face via
+		// MetaHuman Copy Pose. Zero them when Godfrey is not speaking so they cannot
+		// look like lipsync. While speaking, leave Face alone so ACE owns the mouth;
+		// the body graph still strips the same curves so they do not add to ACE.
+		if (!bIsSpeaking)
+		{
+			if (USkeletalMeshComponent* const Face = FindFollowerMeshByComponentName(FName(TEXT("Face"))))
+			{
+				if (UAnimInstance* const FaceAnim = Face->GetAnimInstance())
+				{
+					GodfreySuppressBakedSpeechLipCurves(FaceAnim);
+				}
+			}
+		}
 	}
 
 	if (bEnableIdleMicroMotion)
@@ -4925,6 +5440,10 @@ void UGodfreyPerformerAnimationBridgeComponent::TickComponent(float DeltaTime, E
 	if (bIsSpeaking)
 	{
 		MaintainSpeakingIdleMontage();
+	}
+	else if (bIsThinking && !bIsSpeaking)
+	{
+		MaintainThinkingHoldMontage();
 	}
 	else if (bHoldingCameraFocusWhileAwaitingReply && bIsListening && !bIsSpeaking)
 	{
@@ -5300,6 +5819,8 @@ void UGodfreyPerformerAnimationBridgeComponent::StopAllBodyMontages(const TCHAR*
 	}
 	AnimInst->Montage_Stop(GetBodyMontageBlendOut());
 	ActiveSpeakingIdlePlayMontage = nullptr;
+	ActiveNamedActionPlayMontage = nullptr;
+	SuppressSpeakingIdleUntilWorldTime = -1.0;
 	ActivePlantedStanceMontage = nullptr;
 	ActiveTravelMontage = nullptr;
 	bTravelRootMotionActive = false;
@@ -5599,6 +6120,10 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 		PlayMontage->BlendIn.GetBlendTime(),
 		PlayMontage->BlendOut.GetBlendTime());
 	LogActingPlay(ContextLabel, PlayMontage, PlaySeq, PlayRate, bLoopMontage, PlayLength, PlayLength > KINDA_SMALL_NUMBER);
+	if (PlayLength > KINDA_SMALL_NUMBER)
+	{
+		LastPlayedBodyMontage = PlayMontage;
+	}
 
 	if (bUseUpperBody)
 	{
@@ -5681,6 +6206,11 @@ bool UGodfreyPerformerAnimationBridgeComponent::PlayMontageIfPossible(UAnimMonta
 				SpeakingIdleMontageWallCycleSeconds,
 				SafeRate);
 		}
+	}
+
+	if (PlayLength > KINDA_SMALL_NUMBER && IsNamedTakeHoldContext(ContextLabel))
+	{
+		HoldSpeakingPoolForMontage(PlayMontage, ContextLabel);
 	}
 
 	FName MontageSlotName = NAME_None;
@@ -5803,8 +6333,25 @@ void UGodfreyPerformerAnimationBridgeComponent::TryStartIdleBreathingMontage()
 
 void UGodfreyPerformerAnimationBridgeComponent::PlaySpeakingIdleInternal(const bool bRestartIfAlreadyPlaying)
 {
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [SpeakingIdle]: skip pool — named take '%s' still owns overlay."),
+			ActiveNamedActionPlayMontage ? *ActiveNamedActionPlayMontage->GetName() : TEXT("(armed)"));
+		return;
+	}
+	if (TryPlayNextQueuedBrainSpeakingTake(TEXT("speaking-idle-queued")))
+	{
+		return;
+	}
+	if (!LastBrainSpeakingActionId.IsEmpty())
+	{
+		LastSpeakingPoolStem = LastBrainSpeakingActionId;
+	}
+	ClearNamedPerformanceTakeHold(TEXT("speaking-pool-start"));
 	ClearSpeakingIdleChainTimer();
-	// R14: shuffled speaking-pool one-shots with soft blend — never section-loop CalmExplanation alone.
+	// R14: shuffled basic explaining one-shots. Used when Brain omitted a gesture, and after a
+	// Brain take ends mid-utterance (do not loop the same stem).
 	if (UAnimMontage* const PoolMontage = PickSpeakingMontageFromPool(TEXT("SpeakingIdle")))
 	{
 		PlayMontageIfPossible(PoolMontage, TEXT("SpeakingIdle"), SpeakingMotionIntensity, bRestartIfAlreadyPlaying,
@@ -5868,13 +6415,38 @@ void UGodfreyPerformerAnimationBridgeComponent::OnSpeakingIdleMontageEnded(UAnim
 		return;
 	}
 
-	if (bIsSpeaking)
+	if (IsReplacedOverlayMontage(EndedMontage))
 	{
 		UE_LOG(LogGodfreyPerformance, Log,
-			TEXT("GodfreyPerformerBridge [SpeakingIdle]: montage '%s' ended while still speaking — next speaking-pool AS."),
+			TEXT("GodfreyPerformerBridge: montage '%s' ended after already advancing — keep '%s'."),
+			EndedMontage ? *EndedMontage->GetName() : TEXT("(null)"),
+			ActiveSpeakingIdlePlayMontage ? *ActiveSpeakingIdlePlayMontage->GetName() : TEXT("(none)"));
+		return;
+	}
+
+	if (bIsSpeaking)
+	{
+		if (ShouldHoldNamedPerformanceTake())
+		{
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformerBridge [SpeakingIdle]: montage '%s' ended — named take still owns overlay, not chaining pool."),
+				EndedMontage ? *EndedMontage->GetName() : TEXT("(null)"));
+			return;
+		}
+		if (EndedMontage && EndedMontage == ActiveNamedActionPlayMontage)
+		{
+			ClearNamedPerformanceTakeHold(TEXT("named-take-ended"));
+		}
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [SpeakingIdle]: montage '%s' ended while still speaking — next Brain take or speaking-pool AS."),
 			EndedMontage ? *EndedMontage->GetName() : TEXT("(null)"));
 		PlaySpeakingIdleInternal(true);
 		return;
+	}
+
+	if (EndedMontage && EndedMontage == ActiveNamedActionPlayMontage)
+	{
+		ClearNamedPerformanceTakeHold(TEXT("named-take-ended-idle"));
 	}
 
 	if (bDialogGreetingHoldActive)
@@ -5888,23 +6460,19 @@ void UGodfreyPerformerAnimationBridgeComponent::OnSpeakingIdleMontageEnded(UAnim
 	// Dialog idle hold: one-shot ended — advance to next shuffled listening-pool AS (R9).
 	if (bHoldingCameraFocusWhileAwaitingReply && bIsListening && !bIsSpeaking)
 	{
-		const bool bAwaitingBrain = PerformerState && PerformerState->IsAwaitingBrainReply();
 		UE_LOG(LogGodfreyPerformance, Log,
-			TEXT("GodfreyPerformerBridge [AwaitHold]: montage '%s' ended while awaiting %s — next listening-pool AS."),
-			EndedMontage ? *EndedMontage->GetName() : TEXT("(null)"),
-			bAwaitingBrain ? TEXT("brain") : TEXT("visitor reply"));
-		PlayAwaitingConversationHoldMontage(
-			bAwaitingBrain ? TEXT("AwaitBrainListening") : TEXT("AwaitReplyNeutral"),
-			true);
+			TEXT("GodfreyPerformerBridge [AwaitHold]: montage '%s' ended while awaiting visitor — next listening-pool AS."),
+			EndedMontage ? *EndedMontage->GetName() : TEXT("(null)"));
+		PlayAwaitingConversationHoldMontage(TEXT("AwaitReplyNeutral"), true);
 		return;
 	}
 
 	if (PerformerState && PerformerState->IsInDialog() && bIsThinking && !bIsSpeaking)
 	{
 		UE_LOG(LogGodfreyPerformance, Log,
-			TEXT("GodfreyPerformerBridge [ConversingIdle]: montage '%s' ended while thinking — next listening-pool AS."),
+			TEXT("GodfreyPerformerBridge [ConversingIdle]: montage '%s' ended while thinking — next thinking-pool AS."),
 			EndedMontage ? *EndedMontage->GetName() : TEXT("(null)"));
-		PlayAwaitingConversationHoldMontage(TEXT("ConversingIdle"), true);
+		PlayThinkingHoldMontage(TEXT("Thinking"));
 		return;
 	}
 
@@ -5939,6 +6507,15 @@ void UGodfreyPerformerAnimationBridgeComponent::PlayAwaitingConversationHoldMont
 		UE_LOG(LogGodfreyPerformance, Log,
 			TEXT("GodfreyPerformerBridge [%s]: deferred — post-speech speaking body still holding."),
 			ContextLabel ? ContextLabel : TEXT("AwaitHold"));
+		return;
+	}
+
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [%s]: deferred — named take '%s' still owns overlay."),
+			ContextLabel ? ContextLabel : TEXT("AwaitHold"),
+			ActiveNamedActionPlayMontage ? *ActiveNamedActionPlayMontage->GetName() : TEXT("(armed)"));
 		return;
 	}
 
@@ -6031,6 +6608,10 @@ void UGodfreyPerformerAnimationBridgeComponent::MaintainAwaitingConversationHold
 	{
 		return;
 	}
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		return;
+	}
 
 	UAnimInstance* const AnimInst = TargetSkeletalMesh->GetAnimInstance();
 	if (!AnimInst)
@@ -6045,12 +6626,13 @@ void UGodfreyPerformerAnimationBridgeComponent::MaintainAwaitingConversationHold
 	}
 
 	const bool bAwaitingBrain = PerformerState && PerformerState->IsAwaitingBrainReply();
+	if (bAwaitingBrain)
+	{
+		return;
+	}
 	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyPerformerBridge [AwaitHold]: hold inactive while awaiting %s — next listening-pool AS."),
-		bAwaitingBrain ? TEXT("brain") : TEXT("visitor reply"));
-	PlayAwaitingConversationHoldMontage(
-		bAwaitingBrain ? TEXT("AwaitBrainListening") : TEXT("AwaitReplyNeutral"),
-		true);
+		TEXT("GodfreyPerformerBridge [AwaitHold]: hold inactive while awaiting visitor reply — next listening-pool AS."));
+	PlayAwaitingConversationHoldMontage(TEXT("AwaitReplyNeutral"), true);
 }
 
 bool UGodfreyPerformerAnimationBridgeComponent::ShouldSuppressPresenceOwnedBodyCues() const
@@ -6090,6 +6672,11 @@ void UGodfreyPerformerAnimationBridgeComponent::MaintainSpeakingIdleMontage()
 		return;
 	}
 
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		return;
+	}
+
 	if (const UWorld* World = GetWorld())
 	{
 		if (World->GetTimeSeconds() < SuppressSpeakingIdleUntilWorldTime)
@@ -6118,6 +6705,10 @@ void UGodfreyPerformerAnimationBridgeComponent::MaintainSpeakingIdleMontage()
 
 void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultListeningPool()
 {
+	ListeningWhileVisitorSpeaksPool.RemoveAll([](const FString& Stem)
+	{
+		return GodfreyIsConversationIdleStem(Stem);
+	});
 	if (ListeningWhileVisitorSpeaksPool.Num() > 0)
 	{
 		return;
@@ -6141,7 +6732,8 @@ bool UGodfreyPerformerAnimationBridgeComponent::IsDialogIdleHoldContext(const TC
 		|| C.Contains(TEXT("ConversingIdle"), ESearchCase::IgnoreCase)
 		|| C.Contains(TEXT("DialogIdle"), ESearchCase::IgnoreCase)
 		|| C.Contains(TEXT("PostSpeechSettle"), ESearchCase::IgnoreCase)
-		|| C.Equals(TEXT("Listening"), ESearchCase::IgnoreCase);
+		|| C.Equals(TEXT("Listening"), ESearchCase::IgnoreCase)
+		|| C.Contains(TEXT("Thinking"), ESearchCase::IgnoreCase);
 }
 
 bool UGodfreyPerformerAnimationBridgeComponent::IsSeaIdleHoldContext(const TCHAR* ContextLabel)
@@ -6302,7 +6894,7 @@ void UGodfreyPerformerAnimationBridgeComponent::ReshuffleListeningPoolOrder()
 		{
 			S.RightChopInline(3);
 		}
-		if (!S.IsEmpty())
+		if (!S.IsEmpty() && !GodfreyIsConversationIdleStem(S))
 		{
 			Clean.AddUnique(S);
 		}
@@ -6389,34 +6981,231 @@ UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::PickListeningMontageFro
 	return ListeningEnterMontage.Get();
 }
 
+void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultThinkingPool()
+{
+	if (ThinkingWhileAwaitingBrainPool.Num() > 0)
+	{
+		return;
+	}
+	ThinkingWhileAwaitingBrainPool = {
+		TEXT("ThinkingHandToChin_01"),
+		TEXT("Thinking_01"),
+		TEXT("Thinking_02"),
+		TEXT("ThinkingDeepBreath_01"),
+		TEXT("ThinkingDeepBreath_02"),
+		TEXT("ThinkingRemembering_01"),
+		TEXT("ThinkingScratchingHead_01"),
+		TEXT("ThinkingCoy_01"),
+	};
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::ReshuffleThinkingPoolOrder()
+{
+	EnsureDefaultThinkingPool();
+
+	TArray<FString> Common;
+	TArray<FString> Rare;
+	Common.Reserve(ThinkingWhileAwaitingBrainPool.Num());
+	for (const FString& Stem : ThinkingWhileAwaitingBrainPool)
+	{
+		FString S = Stem.TrimStartAndEnd();
+		if (S.StartsWith(TEXT("AS_"), ESearchCase::IgnoreCase))
+		{
+			S.RightChopInline(3);
+		}
+		if (S.IsEmpty() || GodfreyIsConversationIdleStem(S))
+		{
+			continue;
+		}
+		if (S.Contains(TEXT("LookingToSea"), ESearchCase::IgnoreCase)
+			|| S.Contains(TEXT("LookingAway"), ESearchCase::IgnoreCase)
+			|| S.Contains(TEXT("ReturnGaze"), ESearchCase::IgnoreCase))
+		{
+			continue;
+		}
+		if (GodfreyIsRareThinkingStem(S))
+		{
+			Rare.AddUnique(S);
+			continue;
+		}
+		Common.AddUnique(S);
+	}
+	if (Common.Num() == 0)
+	{
+		ShuffledThinkingPoolOrder.Reset();
+		NextThinkingPoolIndex = 0;
+		return;
+	}
+
+	for (int32 i = Common.Num() - 1; i > 0; --i)
+	{
+		const int32 j = FMath::RandRange(0, i);
+		Common.Swap(i, j);
+	}
+	if (Common.Num() > 1 && !LastThinkingPoolStem.IsEmpty()
+		&& Common[0].Equals(LastThinkingPoolStem, ESearchCase::IgnoreCase))
+	{
+		Common.Swap(0, Common.Num() - 1);
+	}
+
+	FString RareNote = TEXT("none");
+	// Coy / ScratchingHead: about one thinking deck in eight, and never the first clip.
+	if (Rare.Num() > 0 && FMath::RandRange(0, 7) == 0)
+	{
+		const FString RareStem = Rare[FMath::RandRange(0, Rare.Num() - 1)];
+		Common.Add(RareStem);
+		RareNote = RareStem;
+	}
+
+	ShuffledThinkingPoolOrder = MoveTemp(Common);
+	NextThinkingPoolIndex = 0;
+
+	FString OrderLog;
+	for (int32 i = 0; i < ShuffledThinkingPoolOrder.Num(); ++i)
+	{
+		if (i > 0)
+		{
+			OrderLog += TEXT(" -> ");
+		}
+		OrderLog += ShuffledThinkingPoolOrder[i];
+	}
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: reshuffled thinking-pool deck (%d, rare=%s): %s"),
+		ShuffledThinkingPoolOrder.Num(),
+		*RareNote,
+		*OrderLog);
+}
+
+FString UGodfreyPerformerAnimationBridgeComponent::TakeNextThinkingPoolStem()
+{
+	if (NextThinkingPoolIndex >= ShuffledThinkingPoolOrder.Num())
+	{
+		ReshuffleThinkingPoolOrder();
+	}
+	if (ShuffledThinkingPoolOrder.Num() == 0)
+	{
+		return FString();
+	}
+	const FString Stem = ShuffledThinkingPoolOrder[NextThinkingPoolIndex++];
+	LastThinkingPoolStem = Stem;
+	return Stem;
+}
+
+UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::PickThinkingMontageFromPool(const TCHAR* ContextLabel)
+{
+	const FString ChosenStem = TakeNextThinkingPoolStem();
+	if (ChosenStem.IsEmpty())
+	{
+		return ThinkingMontage;
+	}
+
+	if (UAnimSequence* Seq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(ChosenStem)))
+	{
+		UAnimMontage* const Built = MakeOrGetPlaceholderMontage(Seq, ContextLabel ? ContextLabel : TEXT("ThinkingPool"), 1);
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [%s]: thinking pool next '%s' (deck %d/%d, EyeFixed prefer=%d)."),
+			ContextLabel ? ContextLabel : TEXT("ThinkingPool"),
+			*ChosenStem,
+			NextThinkingPoolIndex,
+			ShuffledThinkingPoolOrder.Num(),
+			bPreferEyeFixedLibraryVariants ? 1 : 0);
+		return Built ? Built : ThinkingMontage.Get();
+	}
+
+	UE_LOG(LogGodfreyPerformance, Warning,
+		TEXT("GodfreyPerformerBridge [%s]: thinking pool stem '%s' missing — fallback ThinkingMontage."),
+		ContextLabel ? ContextLabel : TEXT("ThinkingPool"),
+		*ChosenStem);
+	return ThinkingMontage.Get();
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::PlayThinkingHoldMontage(const TCHAR* ContextLabel)
+{
+	if (bPostSpeechSpeakingBodyHold)
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [%s]: deferred — post-speech speaking body still holding."),
+			ContextLabel ? ContextLabel : TEXT("ThinkingHold"));
+		return;
+	}
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [%s]: deferred — named take still owns overlay."),
+			ContextLabel ? ContextLabel : TEXT("ThinkingHold"));
+		return;
+	}
+
+	UAnimMontage* Montage = PickThinkingMontageFromPool(ContextLabel);
+	if (!Montage)
+	{
+		Montage = ThinkingMontage;
+	}
+	if (!Montage)
+	{
+		UE_LOG(LogGodfreyPerformance, Warning,
+			TEXT("GodfreyPerformerBridge [%s]: no thinking montage for Wait/Brain hold."),
+			ContextLabel ? ContextLabel : TEXT("ThinkingHold"));
+		return;
+	}
+
+	PlayMontageIfPossible(Montage, ContextLabel ? ContextLabel : TEXT("Thinking"), 0.9f, true,
+		/*bLoop=*/false, /*bChainAsHold=*/true, /*bSoftSlotReplace=*/true);
+	ScheduleDialogIdleEarlyChainAdvance();
+}
+
+void UGodfreyPerformerAnimationBridgeComponent::MaintainThinkingHoldMontage()
+{
+	if (bOperatorPerformanceHold)
+	{
+		return;
+	}
+	if (!bEnableBodyMontages || !bIsThinking || bIsSpeaking || !IsValid(TargetSkeletalMesh))
+	{
+		return;
+	}
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		return;
+	}
+
+	UAnimInstance* const AnimInst = TargetSkeletalMesh->GetAnimInstance();
+	if (!AnimInst)
+	{
+		return;
+	}
+
+	UAnimMontage* const HoldMontage = ActiveSpeakingIdlePlayMontage.Get();
+	if (HoldMontage && AnimInst->Montage_IsActive(HoldMontage))
+	{
+		return;
+	}
+
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge [ThinkingHold]: hold inactive while awaiting Brain — next thinking-pool AS."));
+	PlayThinkingHoldMontage(TEXT("ThinkingHold"));
+}
+
 void UGodfreyPerformerAnimationBridgeComponent::EnsureDefaultSpeakingPool()
 {
-	if (SpeakingIdlePool.Num() == 0)
+	// Always rebuild from the generic allowlist. A BP-serialized deck that still
+	// contains SummingUpHisCase / DescribingWhere / WantingToBeUnderstood will
+	// otherwise play those takes against unrelated spoken lines (R14).
+	SpeakingIdlePool.Reset();
+	for (int32 i = 0; i < GodfreyGenericSpeakingPoolStemCount; ++i)
 	{
-		// Expansive speaking body: newer Explaining/plea takes first, then Describing* + Speaking* (R14).
-		SpeakingIdlePool = {
-			TEXT("Explaining_01"),
-			TEXT("Explaining_02"),
-			TEXT("ExplainingFirmly_01"),
-			TEXT("DescribingWhere_01"),
-			TEXT("WantingToBeUnderstood_01"),
-			TEXT("SummingUpHisCase_01"),
-			TEXT("SpeakingCalmExplanation_01"),
-			TEXT("SpeakingGentleEmphasis_01"),
-			TEXT("SpeakingDescribeDistance_01"),
-			TEXT("SpeakingDescribeSequence_01"),
-			TEXT("SpeakingDescribeSize_01"),
-			TEXT("SpeakingExplainDanger_01"),
-			TEXT("DescribingTheGeorgette_01"),
-			TEXT("DescribingWereYouAfraid_01"),
-			TEXT("DescribingWereYouAfraid_02"),
-			TEXT("DescribingWhatGraceBusselWasLike_01"),
-			TEXT("DescribingWhatHappenedThatNight_01"),
-			TEXT("DescribingWhatVisitorsShouldRemember_01"),
-			TEXT("DescribingWhatYouWouldDoDifferently_01"),
-		};
+		SpeakingIdlePool.Add(GodfreyGenericSpeakingPoolStems[i]);
 	}
 	GodfreyInjectStems(SpeakingIdlePool, GodfreyPrioritySpeakingStems, GodfreyPrioritySpeakingStemCount);
+	SpeakingIdlePool.RemoveAll([](const FString& Stem)
+	{
+		FString S = Stem.TrimStartAndEnd();
+		if (S.StartsWith(TEXT("AS_"), ESearchCase::IgnoreCase))
+		{
+			S.RightChopInline(3);
+		}
+		return S.IsEmpty() || GodfreyIsBrainCuedSpeakingStem(S);
+	});
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::ReshuffleSpeakingPoolOrder()
@@ -6470,16 +7259,49 @@ void UGodfreyPerformerAnimationBridgeComponent::ReshuffleSpeakingPoolOrder()
 
 FString UGodfreyPerformerAnimationBridgeComponent::TakeNextSpeakingPoolStem()
 {
-	if (NextSpeakingPoolIndex >= ShuffledSpeakingPoolOrder.Num())
+	auto StemIsBlocked = [this](const FString& Candidate)
 	{
-		ReshuffleSpeakingPoolOrder();
-	}
-	if (ShuffledSpeakingPoolOrder.Num() == 0)
+		if (Candidate.IsEmpty())
+		{
+			return true;
+		}
+		if (Candidate.Equals(LastSpeakingPoolStem, ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+		if (!WasSpeakingStemUsedThisUtterance(Candidate))
+		{
+			return false;
+		}
+		for (int32 i = 0; i < GodfreyGenericSpeakingPoolStemCount; ++i)
+		{
+			if (!WasSpeakingStemUsedThisUtterance(GodfreyGenericSpeakingPoolStems[i]))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	FString Stem;
+	for (int32 Guard = 0; Guard < 16; ++Guard)
 	{
-		return FString();
+		if (NextSpeakingPoolIndex >= ShuffledSpeakingPoolOrder.Num())
+		{
+			ReshuffleSpeakingPoolOrder();
+		}
+		if (ShuffledSpeakingPoolOrder.Num() == 0)
+		{
+			return FString();
+		}
+		Stem = ShuffledSpeakingPoolOrder[NextSpeakingPoolIndex++];
+		if (ShuffledSpeakingPoolOrder.Num() <= 1 || !StemIsBlocked(Stem))
+		{
+			break;
+		}
 	}
-	const FString Stem = ShuffledSpeakingPoolOrder[NextSpeakingPoolIndex++];
 	LastSpeakingPoolStem = Stem;
+	MarkSpeakingStemUsedThisUtterance(Stem);
 	return Stem;
 }
 
@@ -6598,29 +7420,47 @@ FString UGodfreyPerformerAnimationBridgeComponent::TakeNextDialogGreetingPoolSte
 
 UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::PickDialogGreetingMontageFromPool(const TCHAR* ContextLabel)
 {
-	const FString ChosenStem = TakeNextDialogGreetingPoolStem();
-	if (ChosenStem.IsEmpty())
-	{
-		return ListeningEnterMontage;
-	}
+	const bool bArrivalCardHold = ContextLabel
+		&& FString(ContextLabel).Contains(TEXT("EngageGreet"), ESearchCase::IgnoreCase);
+	constexpr float MinArrivalHoldSeconds = 4.0f;
 
-	if (UAnimSequence* Seq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(ChosenStem)))
+	for (int32 Guard = 0; Guard < 12; ++Guard)
 	{
-		UAnimMontage* const Built = MakeOrGetPlaceholderMontage(Seq, ContextLabel ? ContextLabel : TEXT("DialogGreeting"), 1);
-		UE_LOG(LogGodfreyPerformance, Log,
-			TEXT("GodfreyPerformerBridge [%s]: dialog-greeting pool next '%s' (deck %d/%d, EyeFixed prefer=%d)."),
+		const FString ChosenStem = TakeNextDialogGreetingPoolStem();
+		if (ChosenStem.IsEmpty())
+		{
+			break;
+		}
+
+		if (UAnimSequence* Seq = PreferEyeFixedSequence(LoadLibrarySequenceByStem(ChosenStem)))
+		{
+			const float Len = Seq->GetPlayLength();
+			if (bArrivalCardHold && Len + KINDA_SMALL_NUMBER < MinArrivalHoldSeconds)
+			{
+				UE_LOG(LogGodfreyPerformance, Log,
+					TEXT("GodfreyPerformerBridge [%s]: skip short greeting '%s' (%.2fs) — arrival card needs a hold, not a nod."),
+					ContextLabel ? ContextLabel : TEXT("DialogGreeting"),
+					*ChosenStem,
+					Len);
+				continue;
+			}
+			UAnimMontage* const Built = MakeOrGetPlaceholderMontage(Seq, ContextLabel ? ContextLabel : TEXT("DialogGreeting"), 1);
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformerBridge [%s]: dialog-greeting pool next '%s' (deck %d/%d, EyeFixed prefer=%d)."),
+				ContextLabel ? ContextLabel : TEXT("DialogGreeting"),
+				*ChosenStem,
+				NextDialogGreetingPoolIndex,
+				ShuffledDialogGreetingPoolOrder.Num(),
+				bPreferEyeFixedLibraryVariants ? 1 : 0);
+			return Built ? Built : ListeningEnterMontage.Get();
+		}
+
+		UE_LOG(LogGodfreyPerformance, Warning,
+			TEXT("GodfreyPerformerBridge [%s]: dialog-greeting stem '%s' missing — trying next."),
 			ContextLabel ? ContextLabel : TEXT("DialogGreeting"),
-			*ChosenStem,
-			NextDialogGreetingPoolIndex,
-			ShuffledDialogGreetingPoolOrder.Num(),
-			bPreferEyeFixedLibraryVariants ? 1 : 0);
-		return Built ? Built : ListeningEnterMontage.Get();
+			*ChosenStem);
 	}
 
-	UE_LOG(LogGodfreyPerformance, Warning,
-		TEXT("GodfreyPerformerBridge [%s]: dialog-greeting stem '%s' missing — fallback ListeningEnter."),
-		ContextLabel ? ContextLabel : TEXT("DialogGreeting"),
-		*ChosenStem);
 	return ListeningEnterMontage.Get();
 }
 
@@ -6655,17 +7495,17 @@ void UGodfreyPerformerAnimationBridgeComponent::PlaySpeakingIdleBehaviour()
 
 void UGodfreyPerformerAnimationBridgeComponent::PlayEmphasisBehaviour()
 {
-	PlayMontageIfPossible(EmphasisMontage, TEXT("Emphasis"), 1.f, true);
+	PlayMontageIfPossible(EmphasisMontage, TEXT("Emphasis"), 1.f, true, false, true, true);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::PlayAmusedBehaviour()
 {
-	PlayMontageIfPossible(AmusedMontage, TEXT("Amused"), 1.f, true);
+	PlayMontageIfPossible(AmusedMontage, TEXT("Amused"), 1.f, true, false, true, true);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::PlaySeriousBehaviour()
 {
-	PlayMontageIfPossible(SeriousMontage, TEXT("Serious"), 1.f, true);
+	PlayMontageIfPossible(SeriousMontage, TEXT("Serious"), 1.f, true, false, true, true);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::PlayReturnToIdleBehaviour()
@@ -6749,6 +7589,7 @@ void UGodfreyPerformerAnimationBridgeComponent::StopSpeakingBehaviour()
 	StopLoopedCacheFor(SpeakingStartMontage, TEXT("start-looped"));
 
 	ActiveSpeakingIdlePlayMontage = nullptr;
+	ClearNamedPerformanceTakeHold(TEXT("stop-speaking"));
 	SpeakingIdleMontageCycleSeconds = 0.f;
 	SpeakingIdleMontageWallCycleSeconds = 0.f;
 	SpeakingIdleCycleStartWorldTime = -1.0;
@@ -6817,11 +7658,14 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleListeningStarted()
 		return;
 	}
 
-	// Brain accepted a question; LLM still running — keep camera lock but play real listening montage.
+	// Brain accepted a question; LLM still running — lantern is Wait, play thinking not Listening*.
 	if (bAwaitingBrain && bConversingWait)
 	{
-		ApplyAwaitCamera(TEXT("AwaitBrainListening"));
-		PlayAwaitingConversationHoldMontage(TEXT("AwaitBrainListening"), true);
+		ApplyAwaitCamera(TEXT("AwaitBrainThinking"));
+		bIsListening = false;
+		bIsThinking = true;
+		RefreshMirroredPerformanceState();
+		PlayThinkingHoldMontage(TEXT("AwaitBrainThinking"));
 		UpdatePerformerTickEnabled();
 		return;
 	}
@@ -6893,8 +7737,20 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleThinkingStarted()
 	if (bConversingWait)
 	{
 		SnapOwnerYawToExhibitionFacing(this, TEXT("AwaitReplyThinking"));
-		// R7: in-dialog thinking hold uses attentive listening pool, not sea / weight-shift idle.
-		PlayAwaitingConversationHoldMontage(TEXT("ConversingIdle"), true);
+		if (!bHoldingCameraFocusWhileAwaitingReply)
+		{
+			bHoldingCameraFocusWhileAwaitingReply = true;
+			SavedAttentionTargetForAwaitingReply = CurrentAttentionTarget;
+			bSavedAttentionFollowForAwaitingReply = bEnableAttentionTargetFollow;
+			SavedAttentionOffsetStrengthForAwaitingReply = AttentionOffsetStrength;
+			SavedAttentionInterpSpeedForAwaitingReply = AttentionInterpSpeed;
+		}
+		if (AActor* FocusTarget = ResolvePrimaryViewTarget(this))
+		{
+			CurrentAttentionTarget = FocusTarget;
+		}
+		bEnableAttentionTargetFollow = true;
+		PlayThinkingHoldMontage(TEXT("Thinking"));
 		UpdatePerformerTickEnabled();
 		return;
 	}
@@ -6903,7 +7759,7 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleThinkingStarted()
 		SnapOwnerYawToExhibitionFacing(this, TEXT("PostSpeechSettleThinking"));
 		if (PerformerState && PerformerState->IsInDialog())
 		{
-			PlayAwaitingConversationHoldMontage(TEXT("PostSpeechSettle"), true);
+			PlayThinkingHoldMontage(TEXT("PostSpeechThinking"));
 		}
 		else if (IdleBreathingMontage)
 		{
@@ -6920,12 +7776,7 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleThinkingStarted()
 		UpdatePerformerTickEnabled();
 		return;
 	}
-	PlayMontageIfPossible(
-		ThinkingMontage,
-		TEXT("Thinking"),
-		1.f,
-		!bDeduplicateActiveMontagePlays,
-		bConversingWait);
+	PlayThinkingHoldMontage(TEXT("Thinking"));
 	UpdatePerformerTickEnabled();
 }
 
@@ -6970,25 +7821,58 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleSpeakingStarted()
 	SnapOwnerYawToExhibitionFacing(this, TEXT("SpeakingStart"));
 	LogOrientationSnapshot(this, TEXT("HandleSpeakingStarted.AfterSnap"), CurrentAttentionTarget.Get());
 
-	const bool bSameStartAndIdle =
-		SpeakingStartMontage != nullptr && SpeakingStartMontage == SpeakingIdleMontage;
-	const bool bSkipStart =
-		bPreferSpeakingIdleLoopOnly || bSameStartAndIdle || SpeakingStartMontage == nullptr;
-
-	if (!bSkipStart)
+	if (UWorld* World = GetWorld())
 	{
-		PlayMontageIfPossible(SpeakingStartMontage, TEXT("SpeakingStart"), SpeakingMotionIntensity, true, false);
+		World->GetTimerManager().ClearTimer(EngageChainTimerHandle);
+	}
+	bHoldEngageGreeting = false;
+
+	InterruptGreetingOverlayForSpeech();
+
+	UsedSpeakingStemsThisUtterance.Reset();
+
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		if (!LastBrainSpeakingActionId.IsEmpty())
+		{
+			MarkSpeakingStemUsedThisUtterance(LastBrainSpeakingActionId);
+		}
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: skipping speaking-pool start — named take '%s' holds overlay."),
+			ActiveNamedActionPlayMontage ? *ActiveNamedActionPlayMontage->GetName() : TEXT("(armed)"));
+		UpdatePerformerTickEnabled();
+		return;
 	}
 
-	PlaySpeakingIdleInternal(!bSkipStart);
+	if (ApplyPendingBrainSpeakingTake(TEXT("BeginSpeaking")))
+	{
+		UpdatePerformerTickEnabled();
+		return;
+	}
+
+	LastBrainSpeakingActionId.Empty();
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: no Brain [gesture:] — starting basic speaking-pool AS."));
+	PlaySpeakingIdleInternal(true);
 	UpdatePerformerTickEnabled();
 }
 
 
 void UGodfreyPerformerAnimationBridgeComponent::HandleSpeakingEnded()
 {
+	if (PerformerState && PerformerState->IsUtteranceInProgress())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: ignoring SpeakingEnded — utterance still audible (keep speaking body)."));
+		bIsSpeaking = true;
+		RefreshMirroredPerformanceState();
+		UpdatePerformerTickEnabled();
+		return;
+	}
 	ClearSpeakingIdleChainTimer();
 	bIsSpeaking = false;
+	PendingBrainSpeakingActionId.Empty();
+	QueuedBrainSpeakingActionIds.Reset();
 	RefreshMirroredPerformanceState();
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge: behaviour SpeakingEnded."));
 	LogOrientationSnapshot(this, TEXT("HandleSpeakingEnded.BeforeStop"), CurrentAttentionTarget.Get());
@@ -7078,14 +7962,15 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleEmphasisTriggered()
 	RefreshMirroredPerformanceState();
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge: behaviour Emphasis (GestureIntensity=%.2f)."), GestureIntensity);
 	OnBridgeEmphasis.Broadcast();
-	if (ShouldSuppressPresenceOwnedBodyCues())
+	if (ShouldSuppressPresenceOwnedBodyCues() || bBrainOwnsSpeakingBody)
 	{
 		UE_LOG(LogGodfreyAnimation, Log,
-			TEXT("[Acting] miss | t=%.3f | context=Emphasis | reason=presence-owns-body"),
-			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0);
+			TEXT("[Acting] miss | t=%.3f | context=Emphasis | reason=%s"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0,
+			bBrainOwnsSpeakingBody ? TEXT("brain-owns-speaking-body") : TEXT("presence-owns-body"));
 		return;
 	}
-	PlayMontageIfPossible(EmphasisMontage, TEXT("Emphasis"), 1.f, true);
+	PlayMontageIfPossible(EmphasisMontage, TEXT("Emphasis"), 1.f, true, false, true, true);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::HandleAmusedTriggered()
@@ -7095,14 +7980,15 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleAmusedTriggered()
 	RefreshMirroredPerformanceState();
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge: behaviour Amused (mood flags updated)."));
 	OnBridgeAmused.Broadcast();
-	if (ShouldSuppressPresenceOwnedBodyCues())
+	if (ShouldSuppressPresenceOwnedBodyCues() || bBrainOwnsSpeakingBody)
 	{
 		UE_LOG(LogGodfreyAnimation, Log,
-			TEXT("[Acting] miss | t=%.3f | context=Amused | reason=presence-owns-body"),
-			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0);
+			TEXT("[Acting] miss | t=%.3f | context=Amused | reason=%s"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0,
+			bBrainOwnsSpeakingBody ? TEXT("brain-owns-speaking-body") : TEXT("presence-owns-body"));
 		return;
 	}
-	PlayMontageIfPossible(AmusedMontage, TEXT("Amused"), 1.f, true);
+	PlayMontageIfPossible(AmusedMontage, TEXT("Amused"), 1.f, true, false, true, true);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::HandleSeriousTriggered()
@@ -7112,21 +7998,20 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleSeriousTriggered()
 	RefreshMirroredPerformanceState();
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge: behaviour Serious (mood flags updated)."));
 	OnBridgeSerious.Broadcast();
-	if (ShouldSuppressPresenceOwnedBodyCues())
+	if (ShouldSuppressPresenceOwnedBodyCues() || bBrainOwnsSpeakingBody)
 	{
 		UE_LOG(LogGodfreyAnimation, Log,
-			TEXT("[Acting] miss | t=%.3f | context=Serious | reason=presence-owns-body"),
-			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0);
+			TEXT("[Acting] miss | t=%.3f | context=Serious | reason=%s"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0,
+			bBrainOwnsSpeakingBody ? TEXT("brain-owns-speaking-body") : TEXT("presence-owns-body"));
 		return;
 	}
-	PlayMontageIfPossible(SeriousMontage, TEXT("Serious"), 1.f, true);
+	PlayMontageIfPossible(SeriousMontage, TEXT("Serious"), 1.f, true, false, true, true);
 }
 
 void UGodfreyPerformerAnimationBridgeComponent::HandlePerformanceCueReceived(const FString& CueType, const FString& CueValue,
 	const FString& RawCue)
 {
-	LastActingCueType = CueType;
-	LastActingCueValue = !CueValue.IsEmpty() ? CueValue : CueType;
 	LogActingCue(CueType, CueValue, RawCue);
 
 	UE_LOG(LogGodfreyPerformance, Log, TEXT("GodfreyPerformerBridge: cue forwarded type=\"%s\" value=\"%s\"."), *CueType, *CueValue);
@@ -7135,6 +8020,12 @@ void UGodfreyPerformerAnimationBridgeComponent::HandlePerformanceCueReceived(con
 	{
 		const bool bNamedType = IsNamedActionCueType(CueType);
 		const FString ActionId = !CueValue.IsEmpty() ? CueValue : CueType;
+		const bool bLooksNamed = LooksLikeNamedPerformanceId(ActionId);
+		if (bNamedType || bLooksNamed)
+		{
+			LastActingCueType = CueType;
+			LastActingCueValue = !CueValue.IsEmpty() ? CueValue : CueType;
+		}
 		const bool bFarewellAction = ActionId.Contains(TEXT("Farewell"), ESearchCase::IgnoreCase)
 			|| ActionId.Contains(TEXT("goodbye"), ESearchCase::IgnoreCase);
 		// Farewell presence sequence owns FarewellWave playback — avoid double-play.
@@ -7144,11 +8035,17 @@ void UGodfreyPerformerAnimationBridgeComponent::HandlePerformanceCueReceived(con
 			OnBridgeCueReceived.Broadcast(CueType, CueValue, RawCue);
 			return;
 		}
-		// SeaIdle / Engaging / Farewell own the body chain — do not let story gestures interrupt.
+		// SeaIdle / Engaging / Farewell own the body chain — do not let story gestures interrupt presence.
 		if (ShouldSuppressPresenceOwnedBodyCues()
 			&& (bNamedType || LooksLikeNamedPerformanceId(ActionId))
 			&& !ActionId.IsEmpty())
 		{
+			if (bBrainOwnsSpeakingBody && IsBrainSpeakingBodyAction(ActionId))
+			{
+				EnqueueOrPlayBrainSpeakingAction(ActionId, TEXT("cue-during-presence"));
+				OnBridgeCueReceived.Broadcast(CueType, CueValue, RawCue);
+				return;
+			}
 			UE_LOG(LogGodfreyAnimation, Log,
 				TEXT("[Acting] miss | t=%.3f | context=NamedAction | cueValue=%s | reason=presence-owns-body"),
 				GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0,
@@ -7158,7 +8055,14 @@ void UGodfreyPerformerAnimationBridgeComponent::HandlePerformanceCueReceived(con
 		}
 		if ((bNamedType || LooksLikeNamedPerformanceId(ActionId)) && !ActionId.IsEmpty())
 		{
-			PlayNamedPerformanceAction(ActionId, true);
+			if (bBrainOwnsSpeakingBody && IsBrainSpeakingBodyAction(ActionId))
+			{
+				EnqueueOrPlayBrainSpeakingAction(ActionId, TEXT("cue"));
+			}
+			else
+			{
+				PlayNamedPerformanceAction(ActionId, true);
+			}
 		}
 	}
 
@@ -7171,6 +8075,8 @@ void UGodfreyPerformerAnimationBridgeComponent::HandleSeaIdleStarted()
 	bPostSpeechSpeakingBodyHold = false;
 	ClearSpeakingIdleChainTimer();
 	ResetFirstDialogGreetingHold();
+	bHoldEngageGreeting = false;
+	ClearBrainSpeakingActionMemory(TEXT("SeaIdle"));
 	if (bHoldingCameraFocusWhileAwaitingReply)
 	{
 		CurrentAttentionTarget = SavedAttentionTargetForAwaitingReply.Get();
@@ -7346,6 +8252,13 @@ void UGodfreyPerformerAnimationBridgeComponent::AdvanceSpeakingIdleChain()
 	{
 		return;
 	}
+	if (ShouldHoldNamedPerformanceTake())
+	{
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge [SpeakingIdle]: early chain skipped — named take '%s' holds overlay."),
+			ActiveNamedActionPlayMontage ? *ActiveNamedActionPlayMontage->GetName() : TEXT("(armed)"));
+		return;
+	}
 	UE_LOG(LogGodfreyPerformance, Log,
 		TEXT("GodfreyPerformerBridge [SpeakingIdle]: early chain advance — next speaking-pool AS."));
 	PlaySpeakingIdleInternal(true);
@@ -7411,21 +8324,17 @@ void UGodfreyPerformerAnimationBridgeComponent::AdvanceDialogIdleChain()
 
 	if (bHoldingCameraFocusWhileAwaitingReply && bIsListening && !bIsSpeaking)
 	{
-		const bool bAwaitingBrain = PerformerState && PerformerState->IsAwaitingBrainReply();
 		UE_LOG(LogGodfreyPerformance, Log,
-			TEXT("GodfreyPerformerBridge [DialogIdle]: early chain advance — next listening-pool AS (awaiting %s)."),
-			bAwaitingBrain ? TEXT("brain") : TEXT("visitor"));
-		PlayAwaitingConversationHoldMontage(
-			bAwaitingBrain ? TEXT("AwaitBrainListening") : TEXT("AwaitReplyNeutral"),
-			true);
+			TEXT("GodfreyPerformerBridge [DialogIdle]: early chain advance — next listening-pool AS (awaiting visitor)."));
+		PlayAwaitingConversationHoldMontage(TEXT("AwaitReplyNeutral"), true);
 		return;
 	}
 
 	if (PerformerState && PerformerState->IsInDialog() && bIsThinking && !bIsSpeaking)
 	{
 		UE_LOG(LogGodfreyPerformance, Log,
-			TEXT("GodfreyPerformerBridge [DialogIdle]: early chain advance — next listening-pool AS (thinking)."));
-		PlayAwaitingConversationHoldMontage(TEXT("ConversingIdle"), true);
+			TEXT("GodfreyPerformerBridge [DialogIdle]: early chain advance — next thinking-pool AS."));
+		PlayThinkingHoldMontage(TEXT("Thinking"));
 	}
 }
 
@@ -7474,21 +8383,30 @@ void UGodfreyPerformerAnimationBridgeComponent::FinishPostSpeechSpeakingHold()
 	ClearPostSpeechSpeakingHoldTimer();
 	const bool bWasHolding = bPostSpeechSpeakingBodyHold;
 	bPostSpeechSpeakingBodyHold = false;
+	ClearNamedPerformanceTakeHold(TEXT("post-speech-to-listening"));
 	if (!bWasHolding && !ActiveSpeakingIdlePlayMontage)
 	{
 		return;
 	}
 
-	UE_LOG(LogGodfreyPerformance, Log,
-		TEXT("GodfreyPerformerBridge [PostSpeech]: soft-blend speaking body -> Listening* (blendOut=%.2fs blendIn=%.2fs)."),
-		GetDialogIdleMontageBlendOut(),
-		GetDialogIdleMontageBlendIn());
-
 	if (PerformerState && PerformerState->IsInDialog())
 	{
-		PlayAwaitingConversationHoldMontage(
-			bIsThinking ? TEXT("PostSpeechConversingIdle") : TEXT("PostSpeechAwaitReply"),
-			true);
+		if (bIsThinking || PerformerState->IsAwaitingBrainReply())
+		{
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformerBridge [PostSpeech]: soft-blend speaking body -> Thinking* (blendOut=%.2fs blendIn=%.2fs)."),
+				GetDialogIdleMontageBlendOut(),
+				GetDialogIdleMontageBlendIn());
+			PlayThinkingHoldMontage(TEXT("PostSpeechThinking"));
+		}
+		else
+		{
+			UE_LOG(LogGodfreyPerformance, Log,
+				TEXT("GodfreyPerformerBridge [PostSpeech]: soft-blend speaking body -> Listening* (blendOut=%.2fs blendIn=%.2fs)."),
+				GetDialogIdleMontageBlendOut(),
+				GetDialogIdleMontageBlendIn());
+			PlayAwaitingConversationHoldMontage(TEXT("PostSpeechAwaitReply"), true);
+		}
 	}
 	else
 	{
@@ -7709,6 +8627,14 @@ void UGodfreyPerformerAnimationBridgeComponent::ArmPresenceWelcomeEngage()
 		TEXT("GodfreyPerformerBridge: presence Welcome armed for next engage (R17)."));
 }
 
+void UGodfreyPerformerAnimationBridgeComponent::SetHoldEngageGreeting(bool bHold)
+{
+	bHoldEngageGreeting = bHold;
+	UE_LOG(LogGodfreyPerformance, Log,
+		TEXT("GodfreyPerformerBridge: hold engage Greeting while arrival card=%d."),
+		bHold ? 1 : 0);
+}
+
 void UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterTurn()
 {
 	const bool bSkipGreet = bSkipEngageGreetMontage && !bForceNextEngageGreetMontage;
@@ -7721,6 +8647,10 @@ void UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterTurn()
 		return;
 	}
 	UAnimMontage* const Greet = PickPresenceWelcomeMontage();
+	if (Greet)
+	{
+		ConsumeFirstDialogGreetingHold(TEXT("presence-Welcome"));
+	}
 	PlayPresenceMontageChainStep(Greet, TEXT("EngageGreet"), EngageChainTimerHandle,
 		FTimerDelegate::CreateUObject(this, &UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterGreet),
 		2.5f);
@@ -7751,6 +8681,27 @@ UAnimMontage* UGodfreyPerformerAnimationBridgeComponent::PickPresenceWelcomeMont
 
 void UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterGreet()
 {
+	if (bIsSpeaking)
+	{
+		bHoldEngageGreeting = false;
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: EngageGreet hold aborted — already speaking."));
+		if (PerformerState)
+		{
+			PerformerState->NotifyEngageSequenceFinished();
+		}
+		return;
+	}
+	if (bHoldEngageGreeting)
+	{
+		UAnimMontage* const NextGreet = PickDialogGreetingMontageFromPool(TEXT("EngageGreetHold"));
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyPerformerBridge: arrival card still up — chaining Greeting hold."));
+		PlayPresenceMontageChainStep(NextGreet, TEXT("EngageGreet"), EngageChainTimerHandle,
+			FTimerDelegate::CreateUObject(this, &UGodfreyPerformerAnimationBridgeComponent::AdvanceEngageAfterGreet),
+			2.5f);
+		return;
+	}
 	if (PerformerState)
 	{
 		PerformerState->NotifyEngageSequenceFinished();

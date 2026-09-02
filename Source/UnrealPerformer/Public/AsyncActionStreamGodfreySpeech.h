@@ -97,6 +97,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Audio|Godfrey|Streaming")
 	void Cancel();
 
+	/** Call before Activate() so ACE ingests but does not Play until ReleaseAudibleHold. */
+	void SetHoldAudibleUntilReleased(bool bHold) { bHoldAudibleUntilReleased = bHold; }
+
 
 
 	UPROPERTY(BlueprintAssignable)
@@ -221,6 +224,16 @@ private:
 
 	FString BuildExhibitionTtsStatusUrl() const;
 
+	FString BuildLivePerformanceEventsUrl() const;
+
+	void StartLivePerformanceCuePoll();
+
+	void StopLivePerformanceCuePoll();
+
+	void PollLivePerformanceEventsOnce();
+
+	void IngestPerformanceEventsFromJson(const TSharedPtr<FJsonObject>& JsonObj);
+
 
 
 	UPROPERTY()
@@ -254,8 +267,19 @@ private:
 
 
 	bool bPullQueuedMode = false;
+	bool bHoldAudibleUntilReleased = false;
 
 	FString QueuedTtsRequestId;
+
+	FString SpeakRequestId;
+
+	int32 PerformanceEventsForwarded = 0;
+
+	bool bLivePerformanceEventsClosed = false;
+
+	bool bPerformanceCuePollInFlight = false;
+
+	FTimerHandle PerformanceCuePollTimerHandle;
 
 
 

@@ -1,6 +1,10 @@
 # Godfrey performance cue contract (middleware ↔ Unreal)
 
-Brain / exhibition middleware drives Godfrey through `UGodfreyPerformanceStateComponent::NotifyPerformanceCue` (also forwarded from `UAsyncActionStreamGodfreySpeech` when the stream JSON includes performance events).
+Brain / exhibition middleware drives Godfrey through `UGodfreyPerformanceStateComponent::NotifyPerformanceCue` (also forwarded from `UAsyncActionStreamGodfreySpeech`).
+
+Live mic (`POST /api/godfrey/speak/stream-pcm`): markers are stripped before ElevenLabs. Parsed `performanceEvents` are stored against `speakRequestId` and Unreal polls `GET /api/godfrey/speak/performance-events?requestId=` while PCM streams.
+
+Queued TTS: the same events arrive on `GET /api/exhibition/unreal-tts-status`.
 
 Body gestures play on `UGodfreyPerformerAnimationBridgeComponent` (`UpperBody` overlay over a planted `DefaultSlot` stance). Face / ACE lip sync is unchanged and stays on the Face mesh.
 
@@ -8,7 +12,7 @@ Body gestures play on `UGodfreyPerformerAnimationBridgeComponent` (`UpperBody` o
 
 | Intent | `type` | `value` | Result |
 |--------|--------|---------|--------|
-| Coarse state | `state` (alias: `performer`) | `idle` \| `listening` \| `thinking` \| `speaking` \| `emphasis` \| `amused` \| `serious` | PerformanceState helpers → bridge behaviour montages |
+| Coarse state | `state` (alias: `performer`) | `idle` \| `listening` \| `thinking` \| `speaking` \| `emphasis` \| `amused` \| `serious` | PerformanceState helpers → bridge behaviour montages. While an utterance is in progress, `emphasis` / `amused` / `serious` are **mood only** (stay Speaking; do not start post-speech Listening*). `listening` / `thinking` / `idle` are ignored until ACE audio ends. |
 | Named action | `action` (also `performance` / `gesture`) | `TwoThumbsUp_01` or `AS_TwoThumbsUp_01` | Bridge resolves `AM_`/`AS_` under `/Game/Godfrey/Animation/Animation/Performances` |
 | Legacy short tokens | `listen` / `think` / `speak` / … | optional | Still routed when short (≤12 chars); named `_01` ids are **not** coarse-matched |
 
@@ -16,7 +20,7 @@ Unknown cues are ignored safely (logged; no crash). Named ids that are missing f
 
 ## Godfrey Brain markers (`D:\Godfrey`)
 
-Brain composes reply text with inline markers, then `lib/performance-text.js` parses them into `performanceEvents` on `GET /api/exhibition/unreal-tts-status`. Markers are stripped before ElevenLabs.
+Brain composes reply text with inline markers, then `lib/performance-text.js` parses them into `performanceEvents`. Markers are stripped before ElevenLabs. Live mic delivers events via `GET /api/godfrey/speak/performance-events`; the queued path uses `GET /api/exhibition/unreal-tts-status`.
 
 | Marker in reply | Emitted event |
 |-----------------|---------------|
@@ -57,10 +61,12 @@ Upper-body montage blend: spine_01 branch (full arm/hand chain), weight **1.0** 
 
 ## Speaking policy
 
-- While speaking, `SpeakingIdleMontage` loops (default: `AS_SpeakingCalmExplanation_01`).
-- Named speaking/gesture clips are one-shots: they can interrupt SpeakingIdle briefly, then idle resumes (`SuppressSpeakingIdleUntil`).
+- While speaking, Brain `[gesture:…]` owns UpperBody. Brain must plan **distinct** takes to cover the whole spoken line (never the same CatalogId twice). Unreal plays each once. If Brain omits a cue or the take ends while he is still talking, Unreal fills with a different basic explaining clip — not idle, not a repeat. Cues during Engaging Welcome prefetch are stashed until audible speech.
+- Named speaking/gesture clips are one-shots: story `[gesture:]` takes own UpperBody until they **end**. Unreal must not play a later Brain cue over a live take — queue it. Cues often arrive **before** ACE `OnAnimationStarted` (LLM tokens, not spoken beats); speak-start must not start the speaking pool over that take. Welcome / Greeting overlays are interrupted when audible speech starts (short blend) so baked visemes cannot fight ACE. After a story take ends, the next queued Brain `[gesture:]` or a different pool clip may resume. Do not start two pool clips from the same ending (tick maintain + montage-ended).
+- Pause / gaze / expression / `[amused]` markers are not body takes and must not restart or replace a Brain speaking take.
+- Live mic: Unreal polls `GET /api/godfrey/speak/performance-events` during `stream-pcm` and plays `[gesture:…]` as named overlays.
 - ACE / PCM utterance start/end still drive `BeginSpeaking` / `EndSpeaking` via `bAutoSpeakingStateFromUtterance`.
-- Montage blend in/out ~0.2s; upper-body layer weight **1.0** — Brain should keep cues sparse (≤1–3 per reply).
+- Dialog overlay blend ~1.5s / 1.6s. Long replies need several `[gesture:]` markers (one per ~10–18s beat), not a single cue.
 
 ## Action catalog
 
@@ -93,5 +99,5 @@ Creates `AM_*` next to `AS_*` when possible and assigns bridge slots. If AM asse
 4. After speak: returns to listening presence, still alive.
 5. Wait ~60s or Brain `[farewell]`: farewell wave → look to sea again.
 6. Call `NotifyNamedPerformanceAction("TwoThumbsUp_01")` (or cue type=`action`, value=`TwoThumbsUp_01`).
-7. From Brain (Unreal output): reply containing `[gesture:TwoThumbsUp_01]` → status `performanceEvents` include `action:TwoThumbsUp_01` → Unreal plays the clip; ElevenLabs text has no marker.
+7. From Brain (live mic or Unreal output): reply containing `[gesture:DescribingWhere_01]` → Unreal log `Godfrey performance cue` / `cue type="action"` → named overlay plays; ElevenLabs text has no marker.
 8. Unknown action id only warns; coarse state unchanged. Lip sync / ACE unchanged.

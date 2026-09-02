@@ -30,6 +30,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Direct Speech")
 	bool AskGodfrey(const FString& PromptText);
 
+	/**
+	 * Same as AskGodfrey, but ACE does not Play until ReleaseHeldAudiblePlayback.
+	 * Brain + TTS + A2F ingest run immediately (arrival-card prefetch). Does not BeginThinking.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Direct Speech")
+	bool AskGodfreyHeldAudible(const FString& PromptText);
+
+	/** Allow a held AskGodfreyHeldAudible stream to become audible. Safe if nothing is held. */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Direct Speech")
+	void ReleaseHeldAudiblePlayback();
+
 	/** Cancel HTTP + ACE for the current AskGodfrey (R10 barge-in). Safe if idle. */
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Direct Speech")
 	void AbortCurrentStream(const FString& Reason);
@@ -98,7 +109,7 @@ private:
 
 	UFUNCTION()
 	void HandleDevSubmitPressed();
-	void StartStreamForPrompt(const FString& TrimmedPrompt);
+	void StartStreamForPrompt(const FString& TrimmedPrompt, bool bHoldAudible = false);
 
 	UFUNCTION()
 	void HandleStreamPlaybackStarted();

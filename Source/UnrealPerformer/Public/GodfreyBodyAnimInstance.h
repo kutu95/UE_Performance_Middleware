@@ -62,6 +62,7 @@ public:
 	virtual void DestroyAnimInstanceProxy(FAnimInstanceProxy* InProxy) override;
 	virtual void NativeInitializeAnimation() override;
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
+	virtual void NativePostEvaluateAnimation() override;
 
 	static const FName DefaultBodyMontageSlotName;
 	static const FName UpperBodyMontageSlotName;
@@ -99,4 +100,5 @@ private:
 	bool bLoggedActiveSlotWeight = false;
 	bool bLoggedHeadAim = false;
 	bool bLoggedNeutralStance = false;
+	bool bLoggedSpeechLipSuppress = false;
 };

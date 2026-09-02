@@ -57,7 +57,8 @@ These look arbitrary and are not. Do not "tidy" them without re-reading this fil
 | `bGodfreyAcePaceIngestByCurveCatchUp` | `False` | **Critical.** When `True`, Unreal throttles pushes whenever curves fall behind. That starves A2F, which then emits digital silence — a measured 938ms run of exact zeros mid-speech. This flag was the original audio dropout. |
 | `bGodfreyDeferEndAudioSamplesForCurveCatchUp` | `True` | With deferral off, `EndAudioSamples` fires at HTTP drain with a 11–21s backlog and blocks the game thread for 2–4 seconds at the start of speech. Deferral lets the backlog shrink first. Do **not** treat A2F’s ~0.9s unmatched floor as “caught up” while the playhead is still mid-utterance (Welcome HTTP burst used to hitch the intro). |
 | `GodfreyAceEndAudioMaxUnmatchedSeconds` | `0.9` | Just above the ~0.88s withholding floor, so the wait ends naturally rather than by timeout. Lower values are unreachable; higher values cost a proportionally longer flush. |
-| `GodfreyAceEndAudioCatchUpTimeoutSeconds` | `3` | Legacy short timeout. **Long utterances** no longer force `EndAudioSamples` after 3s while unmatched is still large mid-speech (that caused multi-second game-thread freezes on occasion speeches). UE waits for natural catch-up, then **flushes once Wall has played all sent PCM** (any length). 120s is only a stall deadline. |
+| `GodfreyAceEndAudioCatchUpTimeoutSeconds` | `3` | Legacy short timeout. **Long utterances** no longer force `EndAudioSamples` after 3s while unmatched is still large mid-speech. UE waits until `Wall >= Sent + BufferLength + GodfreyAceEndAudioPostRollSeconds`. 120s is only a stall deadline. |
+| `GodfreyAceEndAudioPostRollSeconds` | `1.5` | Extra hush before `EndAudioSamples` only. ACE wall leads the speakers — do **not** mute or `Stop()` on this timer. |
 | `GodfreyAceIngestStallTimeoutSeconds` | `6.0` | After playback has caught sent PCM, if HTTP is still open and no new samples **or HTTP body bytes** arrive, Unreal FinishStreams. Prevents silent lip-sync when Brain/TTS hangs. Must stay above a pipelined ElevenLabs flush of the closing sentence (2.5s clipped the tail). |
 | `AceMaxPcmPushChunkDurationMs` | `55.0` | Audio per `AnimateFromAudioSamples` call. |
 | `[/Script/ACECore.ACESettings] BurstMode` | `ForceBurstMode` | See dead ends. Real-time mode makes `AnimateFromAudioSamples` blocking and collapses the editor to 3 FPS. |
@@ -85,6 +86,15 @@ is an explanatory comment in the source at the patch site.
 ## Source fixes worth understanding
 
 Both look like odd code without the story behind them.
+
+**End-of-speech hitch on the last word** — 2026-09-01 11:22. Waiting until `Wall` was
+2s past Sent did **not** remove the glitch. That PIE had `Low curve lead` /
+`Extrapolating` at Wall=8.3 (last voice 8.49s) because A2F still withheld the tail,
+then a **123ms game-thread** `EndAudioSamples` 2s later. NVIDIA documents
+`EndAudioSamples` as safe on any thread. FinishStream now dispatches it at HTTP drain
+on a background thread so the last word gets curves and the mixer does not stall.
+Confirm: `async EndAudioSamples returned` (not `EndAudioSamples returned wall=` on the
+same tick as FinishStream), and **no** `Low curve lead` on the last second of speech.
 
 **Watchdog handling of `Wall == -1`** — `GodfreyPcmStreamSession.cpp` (~line 1867).
 When ACE procedural audio stops, `GetPlaybackWallSeconds` returns -1. The
@@ -132,34 +142,31 @@ The watchdog previously allowed muting up to 80ms early, clipping the last word.
 completion conditions now require `Wall >= ExpectedFromSamples + 0.03s`. Last-voice
 viseme rest no longer `Stop()`s ACE 0.18s early (that clipped “Thank you, Fred”).
 
-**Lip-sync after audio** — muting `ACE Volume` on playback-complete left blendshapes
-running (A2F flush / unmatched tail). Playback-complete now `Stop()`s the curve source
-and the watchdog ends as soon as procedural audio is silent near the sent duration,
-without waiting for leftover curves.
+**Lip-sync after audio** — muting `ACE Volume` or `Stop()` on playback-complete cuts
+speech still in ACE's output delay (2026-09-01 09:39). Rest the face with
+`RequestRestPose()` only. Abort is the only mute/Stop path.
 
-**Stop lips with the voice** — 2026-08-17 after "what do you look for, in that place":
-A2F still applied visemes through trailing TTS hush, then Apply ACE independently
-decayed 55 blendshapes to zero (chewing after speech). The 21:50 Marcia close
-("held her on for the coast as I did?") still twitched: PIE was on a stale
-UnrealPerformer binary (watchdog log had no `LastVoice` / `PastLastVoice`; diag had
-no `gated=`), so ACE ran visemes through the full PCM duration, then `Stop()` snapped
-the last viseme of "did?" to rest.
+**Stop lips with the voice** — 2026-09-01 11:39 "Have you ever been to sea yourself?":
+rest waited for `Wall >= Sent + BufferLength` (`LastVoice=8.21` rest at `9.15`). A2F
+kept hush visemes then extrapolated past `MaxCurveTs`, so the mouth chewed after the
+question. Rest must **not** wait for sent hush. EndSpeaking still waits for sent +
+buffer so audio is not cut.
 
-22:16 "Might I know your name?": rest *did* fire (`LastVoice=12.858`) but ACE was left
-running until `ExpectedSamples=13.180` (~300ms of hush visemes). Playback-complete now
-`Stop()`s at last voice.
+**Last-voice floor too high (2026-09-01 21:09)** — rest at last strong RMS + 0.10s
+closed the mouth while ACE was still playing. 16% of utterance peak (min 4500) treated
+quieter last syllables as hush; the floor also climbed after a shout so later calm
+speech never updated LastVoice. Utt-14: LastVoice=14.61 LastGate=17.35 rest 2.7s early
+(`ProceduralPlaying=1`). Floor is now 8% of peak, clamped 1800–2800. Rest waits ACE
+BufferLength+DAC after LastVoice (wall leads the speakers) and rescans the full gated
+buffer at HTTP drain. Confirm: `rest visemes at last voice` with LastVoice near
+LastVoiceGate (not seconds earlier), Wall ≈ LastVoice + RestAfter (~0.43s), **not**
+~1s later at Expected+slack and **not** 0.10s after an early LastVoice; then
+`ACE playback complete` later.
 
-22:25 "stood out in weather yourself?": `Stop()` did fire at last-voice
-(`LastVoice=20.642` vs `Expected=21.080`) and the face still chewed. The silence gate
-(750) is far too low to mark end-of-speech: decaying breath/fricative still updates
-LastVoice, and A2F lip-syncs that tail.
-
-22:41 "do you wish to know what happened at sea?": RMS LastVoice (9.900) was only
-101ms before the gate (10.001). Question-rise visemes plus body-AS `CTRL_expressions_jaw*`
-on the 1s post-speech speaking hold still moved the mouth. Rest now starts **180ms before**
-the last strong RMS window, floor is ~16% of peak (min 4500), and Apply ACE forces
-MetaHuman jaw/mouth CTRL curves to 0 while rest is latched. Confirm: `LastVoice` clearly
-less than `LastVoiceGate`, rest Wall before LastVoice.
+Earlier close-question history (do not re-`Stop()` to fix this): trailing TTS hush
+still has A2F visemes; gate 750 is too low to mark end-of-speech; Apply ACE zeros
+jaw/mouth CTRL curves while rest is latched. Body overlay jaw is suppressed in
+`GodfreyBodyAnimInstance` (R15).
 
 **Over-articulation / lips during pauses (2026-08-17 Marcia occasion)** — exhibition
 `GodfreySpeechPcmGain` (x2.5) is applied *before* ACE ingest, so A2F sees hotter audio
@@ -185,7 +192,9 @@ Progress/complete now use `TWeakObjectPtr`; Cancel/FailAndStop unbind before can
 | GPU contention from rendering | Capping editor FPS (`t.MaxFPS 60`) changed A2F throughput not at all. |
 | Chain CIG `CudaParameters` onto A2F/A2E sub-instances | **Crashes.** `0xc0000409` in `nvinfer_10.dll` (TensorRT). Reverted. The CIG context is created but never reaches `createInstance` (`chooseCudaContext` warning). |
 | Increase the ingest push budget floor to 2 | No effect. The Brain delivers at ~9x real time; starvation was never on the delivery side. |
-| The end-of-speech glitch is the `EndAudioSamples` hitch | Only partly. The audible dropout was curve starvation; the hitch is a separate, smaller problem. |
+| Mute ACE when Wall says the tail has drained | **Made the glitch far worse (2026-09-01 09:39).** |
+| Wait until Wall is 2s past Sent, then flush on the game thread | **Did not fix it (2026-09-01 11:22).** Last word still had `Low curve lead` / `Extrapolating`; hitch 123ms ran 2s later. |
+| Defer `EndAudioSamples` until `IsProceduralAudioPlaying()==false` | **Deadlock.** The flag stays true until `Stop`/`EndAudioSamples`. |
 | Defer `EndAudioSamples` until curves fully catch up | **Circular.** A2F withholds the tail curves *until* end-of-stream, so the wait can never succeed. Caused ~0.9s of audio with frozen lip sync at the end of every speak. |
 
 ---
@@ -206,11 +215,11 @@ What good looks like:
 
 - No `Low curve lead` warnings during an utterance. One at SID=0 is the warmup and is expected.
 - `Extrapolating` only at the very tail, in single-digit milliseconds.
-- Watchdog `Unmatched` between 0.02 and 0.03.
-- `EndAudioSamples returned wall=` around 165ms, reached via Wall catching Sent (or the 0.9s unmatched gate), not a 60s stall.
-- No `Still deferring EndAudioSamples` lines repeating after Wall ≥ Sent.
+- `FinishStream — dispatching EndAudioSamples off game thread` at HTTP drain (Wall still near 0–2s), then `async EndAudioSamples returned` on a later line (not a game-thread hitch on the last word).
+- No `Still deferring EndAudioSamples` / `Flushing EndAudioSamples after audible tail hush`.
+- No `muting ACE before EndAudioSamples` and no `stopping ACE curves on playback-complete`.
+- `rest visemes at last voice` with LastVoice near LastVoiceGate, Wall ≈ LastVoice + RestAfter (~0.43s), not ~1s later at Expected+slack, and not 0.10s after an early LastVoice.
 - After a short reply, `ACE playback complete` then `listening window open (Speak)` — lantern green.
-- No `ingest stall while HTTP still open` unless Brain/TTS actually hung (utt-8 class). After HTTP drain, stall must stay silent while EndAudioSamples is deferred.
 
 Related diagnostics: `Godfrey.RecordAudio 1` / `Godfrey.RecordAudio 0` captures the master
 submix to WAV (run the `0` while PIE is still active or nothing is written). Useful for
@@ -220,11 +229,9 @@ confirming whether a suspected glitch is real digital silence versus a visual st
 
 ## Open threads
 
-- **~165ms flush is still a game-thread freeze.** Threshold tuning is exhausted. The
-  remaining option is to move `EndAudioSamples` off the game thread: `FAudio2XSession`
-  guards itself with a critical section and we only call it once every push is done, so it
-  looks viable. Unverified: whether curve callbacks and `ActiveA2XSessions->Remove` are
-  safe off the game thread.
+- **EndAudioSamples hitch / last-word curve starve.** 11:22 proved delaying the game-thread
+  flush does not help. It now runs off-thread at HTTP drain. Re-test: no `Low curve lead`
+  on the last second; `async EndAudioSamples returned` not a game-thread `EndAudioSamples returned`.
 - **Try chaining `D3D12Parameters` instead of `CudaParameters`** for CIG, since the CUDA
   variant crashes TensorRT.
 - **`bLogPerAnimateChunkWallTime=True`** is diagnostic noise; turn it off once the flush

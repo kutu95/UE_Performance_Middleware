@@ -262,6 +262,14 @@ public:
 	bool bPlayNamedActionsFromCueBus = true;
 
 	/**
+	 * Brain `[gesture:]` owns UpperBody while that take plays. If Brain sends none, or the take
+	 * ends while he is still talking, Unreal plays a shuffled basic explaining pool — it must
+	 * not leave Greeting/Thinking/Idle on, and must not loop the same Brain stem.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Montages|Library")
+	bool bBrainOwnsSpeakingBody = true;
+
+	/**
 	 * Safety remap for known down-looking / look-away catalog actions.
 	 * When true, problematic named actions are overridden to neutral/front-facing alternatives at runtime.
 	 */
@@ -416,6 +424,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Bridge|Presence")
 	void ArmPresenceWelcomeEngage();
 
+	/** Keep chaining Greeting* until the arrival card finishes (Godfrey is visible behind the text). */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Bridge|Presence")
+	void SetHoldEngageGreeting(bool bHold);
+
 	/**
 	 * Pool for visitor-listen / in-dialog idle posture (R3/R9). Stems without AS_ prefix; EyeFixed preferred.
 	 * Empty → built-in Attentive/Curious/Concerned/Nodding. Played as a shuffled non-repeating deck.
@@ -433,6 +445,22 @@ public:
 
 	UPROPERTY(Transient)
 	int32 NextListeningPoolIndex = 0;
+
+	/**
+	 * Pool while the lantern is Wait / Brain is generating (R3). Camera-safe Thinking* only.
+	 * Empty → HandToChin / Thinking_01/02 / DeepBreath / Remembering. Coy and ScratchingHead are rare (≈1 in 8 decks).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Montages|Pools")
+	TArray<FString> ThinkingWhileAwaitingBrainPool;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Godfrey|Performer|Bridge|Montages|Pools", Transient)
+	FString LastThinkingPoolStem;
+
+	UPROPERTY(Transient)
+	TArray<FString> ShuffledThinkingPoolOrder;
+
+	UPROPERTY(Transient)
+	int32 NextThinkingPoolIndex = 0;
 
 	/**
 	 * Pool for out-of-dialog exhibition SeaIdle (R13). Stems without AS_ prefix; EyeFixed preferred.
@@ -455,8 +483,7 @@ public:
 
 	/**
 	 * Pool for body motion while speaking (R14). Stems without AS_ prefix; EyeFixed preferred.
-	 * Empty → newer Explaining / plea takes plus Describing* / SpeakingDescribe / Calm / Gentle.
-	 * Newer stems are weighted higher in the shuffle. Played as a shuffled one-shot deck.
+	 * Unused while bBrainOwnsSpeakingBody (default). Legacy fallback only if that flag is off.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Godfrey|Performer|Bridge|Montages|Pools")
 	TArray<FString> SpeakingIdlePool;
@@ -838,10 +865,32 @@ private:
 	void OnSpeakingIdleMontageEnded(UAnimMontage* EndedMontage, bool bInterrupted);
 	void BindSpeakingIdleMontageEndDelegate(UAnimInstance* AnimInst, UAnimMontage* PlayMontage);
 	UAnimMontage* ResolvePlaceholderMontageAsset();
-	/** Keep listening/idle hold alive while awaiting brain reply or visitor reply (Conversing). */
+	/** Keep listening hold alive while awaiting the visitor (Speak green). */
 	void PlayAwaitingConversationHoldMontage(const TCHAR* ContextLabel, bool bPreferListeningEnter);
 	void MaintainAwaitingConversationHoldMontage();
 	void SuppressSpeakingIdleUntil(double WorldTimeSeconds);
+	static bool IsNamedTakeHoldContext(const TCHAR* ContextLabel);
+	static bool MontageLooksLikePresenceOrGreeting(const UAnimMontage* Montage);
+	bool IsSpeakingIdleSuppressed() const;
+	/** True while a Brain story `[gesture:]` owns UpperBody — not Welcome/Greeting/Listening. */
+	bool ShouldHoldNamedPerformanceTake() const;
+	static bool IsBrainSpeakingBodyAction(const FString& CueId);
+	void RememberBrainSpeakingAction(const FString& CueId);
+	void ClearBrainSpeakingActionMemory(const TCHAR* Reason);
+	bool WasSpeakingStemUsedThisUtterance(const FString& Stem) const;
+	void MarkSpeakingStemUsedThisUtterance(const FString& Stem);
+	bool TryPlayBrainSpeakingAction(const FString& CueId, const TCHAR* Reason, bool bIgnorePresenceLock);
+	/** Play now, stash until speak-start, or queue behind the take already on UpperBody. Never interrupt a live Brain take. */
+	bool EnqueueOrPlayBrainSpeakingAction(const FString& CueId, const TCHAR* Reason);
+	bool TryPlayNextQueuedBrainSpeakingTake(const TCHAR* Reason);
+	bool ApplyPendingBrainSpeakingTake(const TCHAR* Reason);
+	bool SustainBrainSpeakingTake(const TCHAR* Reason);
+	/** True when EndedMontage is a clip we already replaced (early-chain / same-frame pool). */
+	bool IsReplacedOverlayMontage(UAnimMontage* EndedMontage) const;
+	void HoldSpeakingPoolForMontage(UAnimMontage* Montage, const TCHAR* Reason);
+	void ClearNamedPerformanceTakeHold(const TCHAR* Reason);
+	void ConsumeFirstDialogGreetingHold(const TCHAR* Reason);
+	void InterruptGreetingOverlayForSpeech();
 	/** True while exhibition presence owns the body (SeaIdle / Engaging / Farewell) — suppress story cues. */
 	bool ShouldSuppressPresenceOwnedBodyCues() const;
 	/** Clear a montage slot when its stem matches (e.g. stale IdleStanding SeaIdle/IdleBreathing). */
@@ -860,6 +909,13 @@ private:
 	void EnsureDefaultListeningPool();
 	void ReshuffleListeningPoolOrder();
 	FString TakeNextListeningPoolStem();
+	/** R3: thinking-pool one-shots while lantern is Wait / Brain generating. */
+	UAnimMontage* PickThinkingMontageFromPool(const TCHAR* ContextLabel);
+	void EnsureDefaultThinkingPool();
+	void ReshuffleThinkingPoolOrder();
+	FString TakeNextThinkingPoolStem();
+	void PlayThinkingHoldMontage(const TCHAR* ContextLabel);
+	void MaintainThinkingHoldMontage();
 	static bool IsDialogIdleHoldContext(const TCHAR* ContextLabel);
 	/** R14: next speaking body clip from shuffled deck (EyeFixed when available). */
 	UAnimMontage* PickSpeakingMontageFromPool(const TCHAR* ContextLabel);
@@ -891,7 +947,7 @@ private:
 	void AdvanceSpeakingIdleChain();
 	void ScheduleSpeakingIdleEarlyChainAdvance();
 	void ClearSpeakingIdleChainTimer();
-	/** Soft-advance next listening-pool AS while awaiting reply / thinking (R9 — avoids A-pose). */
+	/** Soft-advance next listening/thinking hold AS (R9 — avoids A-pose). */
 	void AdvanceDialogIdleChain();
 	void ScheduleDialogIdleEarlyChainAdvance();
 	void ClearDialogIdleChainTimer();
@@ -972,11 +1028,25 @@ private:
 
 	/** Consumed by AdvanceEngageAfterTurn when presence arms Welcome (R17). */
 	bool bForceNextEngageGreetMontage = false;
+	/** Arrival card is on screen — keep Greeting* instead of finishing engage. */
+	bool bHoldEngageGreeting = false;
 
 	float IdleMicroTimeSeconds = 0.f;
 	double LastEmphasisMontageWorldTimeSeconds = -1.e10;
-	/** While WorldTime < this, MaintainSpeakingIdleMontage will not restart (named one-shot gestures). */
+	/** While WorldTime < this, speaking-pool start is deferred (named one-shot gestures). */
 	double SuppressSpeakingIdleUntilWorldTime = -1.0;
+	/** Playing Brain/mood overlay that owns UpperBody until it ends (R14 named take). */
+	TObjectPtr<UAnimMontage> ActiveNamedActionPlayMontage;
+	/** Named `[gesture:]` received during Engaging Welcome prefetch — play at BeginSpeaking. */
+	FString PendingBrainSpeakingActionId;
+	/** Later Brain `[gesture:]` markers waiting until the current take finishes (LLM emits them early). */
+	TArray<FString> QueuedBrainSpeakingActionIds;
+	/** Last Brain speaking take this utterance — do not loop it; chain a different clip if speech continues. */
+	FString LastBrainSpeakingActionId;
+	/** CatalogIds already played while this utterance is speaking — never repeat in the same line. */
+	TArray<FString> UsedSpeakingStemsThisUtterance;
+	/** Last body overlay actually passed to Montage_Play (EngageGreet may not be the speaking-idle pointer). */
+	TObjectPtr<UAnimMontage> LastPlayedBodyMontage;
 	/** Last performance cue seen by the bridge (for [Acting] play lines). */
 	FString LastActingCueType;
 	FString LastActingCueValue;

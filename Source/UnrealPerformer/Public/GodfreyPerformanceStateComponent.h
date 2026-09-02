@@ -46,7 +46,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer")
 	void ReturnToIdle();
 
-	/** Enters Emphasising; if already Emphasising, still broadcasts OnEmphasisTriggered so montages can retrigger. */
+	/** Mood only while Speaking / utterance in progress — does not leave Speaking or end the speaking body. */
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer")
 	void TriggerEmphasis();
 
@@ -55,6 +55,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer")
 	void TriggerSerious();
+
+	/** True from NotifyUtteranceStarted until NotifyUtteranceEnded (audible ACE clock). */
+	UFUNCTION(BlueprintPure, Category = "Godfrey|Performer")
+	bool IsUtteranceInProgress() const { return bUtteranceInProgress; }
 
 	// --- Original state API (kept for compatibility; forwards into the same state machine) ---
 
@@ -146,6 +150,10 @@ public:
 	/** Called by animation bridge when farewell chain finishes — return to sea idle. */
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Presence")
 	void NotifyFarewellSequenceFinished();
+
+	/** Drop an in-progress engage (arrival card cancelled) and return to SeaIdle. */
+	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Presence")
+	void CancelEngageReturnToSeaIdle();
 
 	/** Mark visitor activity so the idle timeout resets (listen/think/speak/cues). */
 	UFUNCTION(BlueprintCallable, Category = "Godfrey|Performer|Presence")
@@ -369,6 +377,10 @@ private:
 
 	/** R10 AskGodfrey is in flight (Thinking / streaming / speaking the nudge). */
 	bool bDialogEngagePromptInFlight = false;
+
+	/** True from NotifyUtteranceStarted until NotifyUtteranceEnded. Mood/listen/think cues must not leave Speaking. */
+	UPROPERTY(Transient)
+	bool bUtteranceInProgress = false;
 
 	/** True while Brain has accepted a question and has not yet queued TTS (exhibition awaiting_reply). */
 	UPROPERTY(Transient)

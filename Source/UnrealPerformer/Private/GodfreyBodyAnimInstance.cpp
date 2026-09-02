@@ -3,6 +3,7 @@
 #include "Animation/AnimData/BoneMaskFilter.h"
 #include "Animation/AnimSequence.h"
 #include "GodfreyPerformanceLog.h"
+#include "GodfreySpeechLipCurves.h"
 #include "UnrealPerformerGodfreySettings.h"
 
 const FName UGodfreyBodyAnimInstance::DefaultBodyMontageSlotName(TEXT("DefaultSlot"));
@@ -271,4 +272,18 @@ void UGodfreyBodyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		UpperWeight,
 		UpperBodyLayerWeight,
 		bMontageActive ? 1 : 0);
+}
+
+void UGodfreyBodyAnimInstance::NativePostEvaluateAnimation()
+{
+	Super::NativePostEvaluateAnimation();
+
+	bool bLoggedThisEval = bLoggedSpeechLipSuppress;
+	GodfreySuppressBakedSpeechLipCurves(this, &bLoggedThisEval);
+	if (bLoggedThisEval && !bLoggedSpeechLipSuppress)
+	{
+		bLoggedSpeechLipSuppress = true;
+		UE_LOG(LogGodfreyPerformance, Log,
+			TEXT("GodfreyBodyAnimInstance: zeroing baked speech/jaw curves from body AS (ACE owns lips while speaking; silent takes must not viseme)."));
+	}
 }
